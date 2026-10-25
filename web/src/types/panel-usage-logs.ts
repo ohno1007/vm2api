@@ -81,6 +81,8 @@ export type ReasoningEffort =
 
 /** 滚动日志的一行。`null` = 本行该字段为空（vm2api 不产出的 hub 字段已整体删去）。 */
 export type UsageLogRow = {
+  modelFingerprint?:
+    import('@/features/logs/model-fingerprint').BehavioralFingerprint | null
   /** `usage_logs.id`（`log_<12hex>`），游标 tiebreaker。 */
   id: string
   requestId: string | null

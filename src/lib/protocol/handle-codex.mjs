@@ -1,6 +1,7 @@
 /**
  * Codex hop from handle-protocol. Claude convert/pool/CRS never runs here.
  */
+import { recordMailboxAuthFailure } from '../oauth/codex-mailbox-events.mjs'
 import path from 'node:path'
 import { getVm, listVms, persistCodexUsage, syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
 import { isValidVmId } from '../vm/vm-file.mjs'
@@ -939,6 +940,7 @@ export async function handleCodexProtocol({
           return res.end()
         }
         reportOpenAIAttempt(vm.id, attemptKind, result?.ttftMs ?? null)
+        if (Number(result?.status) === 401) recordMailboxAuthFailure(projectRoot, vm.id)
         const failureHold = codexFailureHold(result)
         if (failureHold) holdOpenAIAccount(vm.id, failureHold)
         if (res.headersSent || hopEmitted) {

@@ -8,6 +8,7 @@ import { withRequestProtocolBetas } from '../protocol/claude-code-betas.mjs'
 import { pinThreadBetas, rememberThreadTurn } from '../protocol/thread-betas.mjs'
 import { applyThinkingDisplay, thinkingDisplayMode } from '../protocol/thinking.mjs'
 import { sealClaudeCodeCch } from '../identity/cch.mjs'
+import { ensureBillingAttribution } from '../identity/crs-persona.mjs'
 import { credentialModeFromOauth } from '../oauth/credential-mode.mjs'
 import { isCrsMock, writeCrsTrace, mockCrsPayload, emitMockSse } from './crs-mock.mjs'
 import {
@@ -464,7 +465,10 @@ export function finalizeWorkerPayload({
     : sanitizeAnthropicBodyForBetaTokens(displayed, headers['anthropic-beta'])
   return {
     headers,
-    body: sealClaudeCodeCch(gated, { enabled: routing?.compatibility?.cch_enabled !== false, seal: !cliHop }),
+    body: sealClaudeCodeCch(ensureBillingAttribution(gated, { sessionId: identity?.callerSessionId || '' }), {
+      enabled: routing?.compatibility?.cch_enabled !== false,
+      seal: !cliHop,
+    }),
     thread: thread.turn,
   }
 }

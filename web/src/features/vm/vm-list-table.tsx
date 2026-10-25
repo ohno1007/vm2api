@@ -52,6 +52,7 @@ import {
 import { VmActionMenu } from '@/features/vm/vm-action-menu'
 import { useVmActions } from '@/features/vm/vm-actions-context'
 import { VmOwnerLine } from '@/features/vm/vm-owner-line'
+import { SubscriptionExpiry } from './subscription-expiry'
 
 /** 列的宽度与弹性；顺序由 `useVmColumnOrder` 决定，不写死在这里。 */
 const COL_CLS: Record<VmColumnKey | 'actions', string> = {
@@ -346,7 +347,7 @@ function TierBadge({ vm }: { vm: Vm }) {
   )
 }
 
-function SlotCell({ vm }: { vm: Vm }) {
+function SlotCell({ vm, now }: { vm: Vm; now: number }) {
   const name = slotNameLabel(vm)
   const email = String(vm.email || '').trim()
   return (
@@ -367,6 +368,7 @@ function SlotCell({ vm }: { vm: Vm }) {
         vm={vm}
         className='truncate text-[10.5px] text-muted-foreground'
       />
+      <SubscriptionExpiry vm={vm} now={now} />
     </div>
   )
 }
@@ -383,7 +385,7 @@ const COLUMNS: Record<
   VmColumnKey,
   { label: string; cell: (ctx: CellCtx) => ReactNode }
 > = {
-  vm: { label: '账号', cell: ({ vm }) => <SlotCell vm={vm} /> },
+  vm: { label: '账号', cell: ({ vm, now }) => <SlotCell vm={vm} now={now} /> },
   sched: {
     label: '调度',
     cell: ({ vm }) => (

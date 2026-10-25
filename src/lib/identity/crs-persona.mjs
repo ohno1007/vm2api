@@ -32,7 +32,7 @@
 import { createHash } from 'node:crypto'
 import { resolveWorkstationProfile } from './workstation-profile.mjs'
 import fs from 'node:fs'
-import { uuidFromSeed } from './identity-rewrite.mjs'
+import { parseUserId, uuidFromSeed } from './identity-rewrite.mjs'
 import { OFFICIAL_CLI_VERSION } from './vm-identity.mjs'
 import { CCH_PLACEHOLDER } from './cch.mjs'
 import { CLAUDE_CLI_UA_RE, isOfficialClaudeUa } from './official-claude-ua.mjs'
@@ -376,25 +376,45 @@ export function buildBillingAttributionText(
   return `x-anthropic-billing-header: cc_version=${ver}.${fp}; cc_entrypoint=sdk-cli; cch=${CCH_PLACEHOLDER}; cc_prompt_id=${promptId};${tail}`
 }
 
-/** Add the billing block exactly once before the cli-node hop. */
-export function ensureBillingAttribution(
-  body,
-  { firstUserText = '', cliVersion = DEFAULT_CLI_VERSION, sessionId = '', indexes = null } = {},
-) {
-  if (!body || typeof body !== 'object') return body
-  const hasBilling = (system) => {
-    if (typeof system === 'string') return /x-anthropic-billing-header:/i.test(system)
-    if (!Array.isArray(system)) return false
-    return system.some((block) => /x-anthropic-billing-header:/i.test(String(block?.text || block || '')))
+/** Persona stripping and custom templates can remove billing; enforce it after those rewrites. */
+export function ensureBillingAttribution(body, { cliVersion = DEFAULT_CLI_VERSION, sessionId = '' } = {}) {
+  const generated = buildBillingAttributionText(
+    extractFirstUserText(body.messages),
+    cliVersion,
+    sessionId || parseUserId(body.metadata?.user_id)?.session_id || '',
+    billingIndexesFromMessages(body.messages),
+  )
+  const lineRe = /^\s*x-anthropic-billing-header:[^\r\n]*/im
+  const fields = ['cc_version', 'cc_entrypoint', 'cch', 'cc_prompt_id']
+  let found = false
+  const complete = (text) =>
+    text.replace(lineRe, (line) => {
+      found = true
+      let next = line
+      for (const key of fields) {
+        if (new RegExp(`\\b${key}=[^;\\s]+`).test(next)) continue
+        const value = generated.match(new RegExp(`\\b${key}=[^;\\s]+`))[0]
+        next = `${next.trimEnd()}${/[;:]$/.test(next.trimEnd()) ? '' : ';'} ${value};`
+      }
+      return next
+    })
+  if (typeof body.system === 'string') {
+    const system = complete(body.system)
+    if (found) return system === body.system ? body : { ...body, system }
+  } else if (Array.isArray(body.system)) {
+    let changed = false
+    const system = body.system.map((block) => {
+      const text = typeof block === 'string' ? block : block?.text
+      if (found || typeof text !== 'string') return block
+      const next = complete(text)
+      if (next === text) return block
+      changed = true
+      return typeof block === 'string' ? next : { ...block, text: next }
+    })
+    if (found) return changed ? { ...body, system } : body
   }
-  if (hasBilling(body.system)) return body
-  const block = {
-    type: 'text',
-    text: buildBillingAttributionText(firstUserText, cliVersion, sessionId, indexes),
-  }
-  if (Array.isArray(body.system)) return { ...body, system: [block, ...body.system] }
-  if (body.system == null || body.system === '') return { ...body, system: [block] }
-  return { ...body, system: [block, { type: 'text', text: String(body.system) }] }
+  const blocks = Array.isArray(body.system) ? body.system : body.system ? [{ type: 'text', text: body.system }] : []
+  return { ...body, system: [{ type: 'text', text: generated }, ...blocks] }
 }
 
 function extractSystemTexts(system) {
@@ -422,13 +442,18 @@ export function isKnownOfficialSystemText(text) {
   if (!t.trim()) return true
   if (isBillingLine(t) || /x-anthropic-billing-header:/i.test(t)) return true
   if (isStandaloneOfficialLine(t)) return true
+  if (/^\s*You are an agent working with the user toward their goals\b/.test(t)) return true
   if (t === CRS_OFFICIAL_AGENT_PROMPT || t === CRS_AGENT_EXPANSION || t === CRS_OFFICIAL_CONTINUATION) return true
   if (t.includes('# Doing tasks') && t.includes('# Tone and style')) return true
   if (t.includes('# Environment') && t.includes('# Text output (does not apply to tool calls)')) return true
   return false
 }
 export function hasEnvironmentSection(text) {
-  return /^[ \t]*# Environment\b/m.test(String(text ?? ''))
+  const value = String(text ?? '')
+  return (
+    /^\s*# Environment\b/.test(value) ||
+    (value.startsWith('# Text output (does not apply to tool calls)') && value.includes('\n# Environment'))
+  )
 }
 
 function dropRewriteSourceText(text, { preserveEnvironment = false } = {}) {
@@ -860,6 +885,7 @@ export function officialSystemEnvFromIdentity(identity = {}, modelId = '', facts
 export function looksLikeAgentPrompt(text) {
   const t = String(text || '').trim()
   if (!t) return false
+  if (/^You are an agent working with the user toward their goals\b/.test(t)) return true
   if (t === CRS_OFFICIAL_AGENT_PROMPT || t === CRS_AGENT_EXPANSION) return true
   if (t.includes('# Doing tasks') && t.includes('# Tone and style')) return true
   if (/You are an interactive agent that helps users with software engineering tasks/i.test(t)) return true

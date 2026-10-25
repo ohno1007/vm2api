@@ -15,6 +15,7 @@ import {
   statusBadgeTooltip,
   thinkingEffortBadgeClass,
 } from './log-display'
+import { FingerprintBadge } from './model-fingerprint'
 
 export function StatusBadge({
   statusCode,
@@ -133,6 +134,9 @@ export function ModelDisplayWithRedirect({
             上游供应商实际返回的模型与请求的模型不一致。计费仍然基于请求模型。
           </TooltipContent>
         </Tooltip>
+      ) : null}
+      {String(model || '').startsWith('gpt-') ? (
+        <FingerprintBadge result={row.modelFingerprint} />
       ) : null}
     </div>
   )

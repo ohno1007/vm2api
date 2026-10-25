@@ -87,6 +87,8 @@ import {
   vmDetailTabs,
 } from '@/features/vm/vm-perms'
 import { VmTestSchedule } from '@/features/vm/vm-test-schedule'
+import { CodexBrowserPanel } from './codex-browser-panel'
+import { CodexPasswordPanel } from './codex-password-panel'
 
 function postVm<T = unknown>(id: string, path: string, body?: unknown) {
   return api<T>(`/api/panel/vms/${encodeURIComponent(id)}${path}`, {
@@ -438,6 +440,12 @@ function VmDetailBody({
             </div>
           ) : null}
         </div>
+        {isCodexVm(vm) && perms.credential && (
+          <div className='mb-4 space-y-3'>
+            <CodexPasswordPanel vm={vm} />
+            <CodexBrowserPanel vm={vm} />
+          </div>
+        )}
         <Tabs value={tab} onValueChange={onTabChange}>
           <TabsList>
             <TabsTrigger value='overview'>概览</TabsTrigger>

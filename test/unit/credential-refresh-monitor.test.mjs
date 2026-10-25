@@ -34,8 +34,8 @@ test('normalize fills defaults', () => {
   assert.equal(n.run_on_start, true)
 })
 
-test('调度关 slot with refresh token is still a refresh target', () => {
-  assert.equal(isCredentialRefreshTarget(offSlot), true)
+test('调度关 slot with refresh token stays idle', () => {
+  assert.equal(isCredentialRefreshTarget(offSlot), false)
   assert.equal(isCredentialRefreshTarget({ ...offSlot, schedulable: true, status: 'running' }), true)
 })
 
@@ -184,7 +184,7 @@ test('fatal refresh parks a schedule_manual slot that was still in the pool', ()
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
-test('monitor includes 调度关 and calls refreshOne', async () => {
+test('monitor skips 调度关 and calls refreshOne', async () => {
   const seen = []
   const monitor = createCredentialRefreshMonitor({
     config: { interval_sec: 60, run_on_start: false },
@@ -195,8 +195,7 @@ test('monitor includes 调度关 and calls refreshOne', async () => {
     },
   })
   const snap = await monitor.runOnce()
-  assert.deepEqual(seen, ['vm-09'])
-  assert.equal(snap.due, 1)
-  assert.equal(snap.items[0].schedulable, false)
-  assert.equal(snap.items[0].ok, false)
+  assert.deepEqual(seen, [])
+  assert.equal(snap.due, 0)
+  assert.deepEqual(snap.items, [])
 })

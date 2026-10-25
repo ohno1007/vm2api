@@ -100,7 +100,7 @@ export function normalizeKernelWatchdogConfig(raw = {}) {
 const HARD_DOWN = new Set(['stopped', 'dead', 'error', 'disabled'])
 
 export function isKernelWatchdogTarget(vm, routing = {}) {
-  if (!vm?.id) return false
+  if (!vm?.id || vm.schedulable === false) return false
   if (HARD_DOWN.has(String(vm.status || '').toLowerCase())) return false
   // Effective engine, not the slot's own fields: panel-created slots omit
   // inference_engine and inherit routing.inference.engine (usually rust).
@@ -108,7 +108,7 @@ export function isKernelWatchdogTarget(vm, routing = {}) {
 }
 
 function isTelemetryHealTarget(vm) {
-  if (!vm?.id) return false
+  if (!vm?.id || vm.schedulable === false) return false
   return !HARD_DOWN.has(String(vm.status || '').toLowerCase())
 }
 
@@ -176,6 +176,7 @@ export function createKernelWatchdog({
   // vmId -> this tick's pending check/restart, so hold() can wait for it to settle.
   const inflight = new Map()
   let healingBridges = false
+  const isHeld = (id) => held.has(id) || !(listTargets?.() || []).some((vm) => vm.id === id && vm.schedulable !== false)
 
   function healBridgesOffPath(vms) {
     if (typeof healBridges !== 'function' || healingBridges) return
@@ -189,7 +190,7 @@ export function createKernelWatchdog({
   }
 
   async function healTelemetry(vm, at) {
-    if (typeof ensureTelemetry !== 'function' || at < (telemetryDue.get(vm.id) || 0)) return
+    if (isHeld(vm.id) || typeof ensureTelemetry !== 'function' || at < (telemetryDue.get(vm.id) || 0)) return
     telemetryDue.set(vm.id, at + telemetryEveryMs)
     try {
       const result = await ensureTelemetry(vm)
@@ -242,7 +243,7 @@ export function createKernelWatchdog({
     if (!probed) {
       // The kernel cannot be probed without its relay; only a container that is really down is revived.
       const observed = await observeRuntime(vm)
-      if (held.has(vm.id) || !['missing', 'stopped', 'restarting'].includes(observed?.state)) return
+      if (isHeld(vm.id) || !['missing', 'stopped', 'restarting'].includes(observed?.state)) return
       return reviveDownContainer(vm, observed.state)
     }
     const exec = {
@@ -251,7 +252,7 @@ export function createKernelWatchdog({
       homeDir: typeof homeDirFor === 'function' ? homeDirFor(vm) : null,
     }
     const current = await health(exec, { timeoutMs: vmNodeId(vm) ? NODE_SLOT_HEALTH_TIMEOUT_MS : 800 })
-    if (held.has(vm.id)) return
+    if (isHeld(vm.id)) return
     // cc-node is the crag worker. Restarting a live kernel SIGKILLs it.
     if (dataplaneUsesCcNode(exec) && rustKernelProcessUp(current)) return
     if (!rustKernelNeedsRestart(current)) {
@@ -261,25 +262,25 @@ export function createKernelWatchdog({
       // Config convergence, not a failure: outside the restart budget.
       if (kernelSlotMismatch(exec)) {
         const observed = await observeRuntime(vm)
-        if (!held.has(vm.id) && observed?.state === 'running') await ensure(exec, { timeoutMs: config.timeout_ms })
+        if (!isHeld(vm.id) && observed?.state === 'running') await ensure(exec, { timeoutMs: config.timeout_ms })
       }
       return
     }
     const reason = current?.unhealthy_reason || current?.error || 'kernel process down'
     const observed = await observeRuntime(vm)
-    if (held.has(vm.id)) return
+    if (isHeld(vm.id)) return
     // Permission/transport failures and deliberately paused containers never authorize recovery.
     if (!['running', 'missing', 'stopped', 'restarting'].includes(observed?.state)) return
     if (observed.state !== 'running') return reviveDownContainer(vm, observed.state)
     if (!admitRestart(vm, reason, now())) return
     console.warn(`[kernel-watchdog] ${vm.id} restarting container: ${reason}`)
     const result = await ensure(exec, { timeoutMs: config.timeout_ms })
-    if (held.has(vm.id)) return
+    if (isHeld(vm.id)) return
     // The container itself is gone or exited: a kernel restart cannot help, a full boot can.
     if (result?.reason === 'container_unavailable' && typeof revive === 'function' && vm.status === 'running') {
       // The container may disappear during ensure; do not mistake a daemon/permission error for absence.
       const latest = await observeRuntime(vm)
-      if (held.has(vm.id) || !['missing', 'stopped', 'restarting'].includes(latest?.state)) return
+      if (isHeld(vm.id) || !['missing', 'stopped', 'restarting'].includes(latest?.state)) return
       console.warn(`[kernel-watchdog] ${vm.id} container unavailable; booting slot`)
       const revived = await revive(vm).catch((error) => ({ ok: false, error: error?.message || String(error) }))
       if (!revived?.ok) console.warn(`[kernel-watchdog] ${vm.id} boot failed: ${revived?.error || revived?.code}`)
@@ -290,13 +291,13 @@ export function createKernelWatchdog({
     if (inTick || !config.enabled) return
     inTick = true
     try {
-      const vms = (typeof listTargets === 'function' ? listTargets() || [] : []).filter((vm) => !held.has(vm?.id))
+      const vms = (typeof listTargets === 'function' ? listTargets() || [] : []).filter((vm) => !isHeld(vm?.id))
       // Bridges (kin-egress, cluster relays) are cheap host helpers, not containers: outside the restart budget.
       healBridgesOffPath(vms)
       // Panel can change routing.inference.engine without restarting this process.
       const routing = typeof getRouting === 'function' ? getRouting() || {} : {}
       for (const vm of vms) {
-        if (held.has(vm.id)) continue
+        if (isHeld(vm.id)) continue
         // Telemetry sidecar heal is independent of kernel-restart targeting: a
         // missing sidecar costs telemetry, not inference. Off the tick's critical
         // path so a slow docker exec cannot delay container restarts. The due time

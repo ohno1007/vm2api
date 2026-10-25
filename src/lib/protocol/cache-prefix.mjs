@@ -259,8 +259,27 @@ function messageDiff(previous, current) {
   return keyDelta(previous.keys, current.keys) || { reason: 'digest' }
 }
 
-function snapshotBody(body) {
+function messageCacheBoundary(body) {
   const messages = Array.isArray(body?.messages) ? body.messages : []
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const content = messages[i]?.content
+    if (!Array.isArray(content)) continue
+    for (let j = content.length - 1; j >= 0; j--) {
+      if (content[j]?.cache_control?.type === 'ephemeral') return { message: i, block: j }
+    }
+  }
+  return null
+}
+
+function snapshotBody(body, boundary = null) {
+  let messages = Array.isArray(body?.messages) ? body.messages : []
+  if (boundary) {
+    messages = messages.slice(0, boundary.message + 1)
+    const last = messages[boundary.message]
+    if (Array.isArray(last?.content)) {
+      messages[boundary.message] = { ...last, content: last.content.slice(0, boundary.block + 1) }
+    }
+  }
   const tools = Array.isArray(body?.tools) ? body.tools : []
   return {
     tools: digest(withoutCacheControl(body?.tools)),
@@ -402,9 +421,9 @@ export function describeCacheContinuity({
 export function peekCachePrefix(sessionKey, body, now = Date.now()) {
   const key = String(sessionKey || '').trim()
   if (!key || !body || typeof body !== 'object') return null
-  const current = snapshotBody(body)
   const hit = sessions.get(key)
   const previous = hit && now - hit.at < SESSION_IDLE_MS ? hit : null
+  const current = snapshotBody(body, previous?.boundary)
   const compared = comparePrefix(previous, current)
   return { ...compared, confirmed: !!previous?.confirmed }
 }
@@ -414,17 +433,21 @@ export function peekCachePrefix(sessionKey, body, now = Date.now()) {
  * unconfirmed until confirmCachePrefix: a failed/rejected hop must not make
  * the next estimate treat the session as warm.
  */
-export function trackCachePrefix(sessionKey, body, now = Date.now()) {
+export function trackCachePrefix(sessionKey, body, now = Date.now(), { cacheOnly = false } = {}) {
   const key = String(sessionKey || '').trim()
   if (!key || !body || typeof body !== 'object') return null
-  const current = snapshotBody(body)
   const hit = sessions.get(key)
   const previous = hit && now - hit.at < SESSION_IDLE_MS ? hit : null
-  const compared = comparePrefix(previous, current)
+  const boundary = cacheOnly ? messageCacheBoundary(body) : null
+  const current = snapshotBody(body, boundary)
+  const priorBoundary = previous?.boundary || null
+  const sameBoundary = priorBoundary?.message === boundary?.message && priorBoundary?.block === boundary?.block
+  // Images after the prior write boundary were never part of the cached prefix.
+  const compared = comparePrefix(previous, !previous || sameBoundary ? current : snapshotBody(body, priorBoundary))
   sessions.delete(key)
-  sessions.set(key, { ...current, turn: compared.turn, at: now, confirmed: false })
+  sessions.set(key, { ...current, boundary, turn: compared.turn, at: now, confirmed: false })
   if (sessions.size > SESSION_LIMIT) sessions.delete(sessions.keys().next().value)
-  return { turn: compared.turn, break: compared.break }
+  return { turn: compared.turn, break: compared.break, ...(cacheOnly ? { scope: 'cached_prefix', boundary } : {}) }
 }
 
 /** Mark the latest attempted snapshot as a confirmed cache write/read. */

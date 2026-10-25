@@ -383,6 +383,7 @@ export type Vm = {
   total_tokens?: number
   expires_at?: string
   refreshed_at?: string
+  auto_refresh_enabled?: boolean
   oauth_source?: string
   account_uuid?: string
   org_uuid?: string

@@ -100,10 +100,15 @@ function WindowCell({
           '—'
         )}
       </div>
-      {win.capacity ? (
+      {win.segs.length ? (
         <>
           <div className='mt-0.5 flex items-baseline justify-between gap-2 text-[11px] text-muted-foreground tabular-nums'>
-            <span>已耗 {win.usedAccounts.toFixed(1)} 账号当量</span>
+            <span>
+              已耗 {win.usedAccounts.toFixed(1)} 账号当量
+              {win.segs.length > win.capacity
+                ? ` · ${win.segs.length - win.capacity} 个待探测`
+                : ''}
+            </span>
             {next ? (
               <span
                 title={`${next.name} · ${new Date(next.at).toLocaleString()}`}
@@ -135,7 +140,9 @@ function WindowCell({
         </>
       ) : (
         <div className='mt-0.5 text-[11px] text-muted-foreground'>
-          无 Fable 凭证（仅 Max 档计入）
+          {win.key === 'fable'
+            ? '无 Fable 凭证（仅 Max 档计入）'
+            : '暂无已探测额度'}
         </div>
       )}
     </div>
@@ -161,7 +168,7 @@ export function PoolQuota({ vms }: { vms: Vm[] }) {
   return (
     <PanelCard
       title='号池额度'
-      meta={`${eligible} 张有效凭证 / 共 ${withToken} · 无效与 revoke 不计`}
+      meta={`${eligible} 张有效凭证 / 共 ${withToken} · 余量仅统计已探测窗口`}
     >
       <div className='grid gap-px bg-border/60 sm:grid-cols-3'>
         {windows.map((w) => (

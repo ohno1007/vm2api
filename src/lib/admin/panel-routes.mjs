@@ -4,6 +4,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { modelFingerprintService } from './model-fingerprint.mjs'
 import {
   verifyPanelLogin,
   createPanelSession,
@@ -31,6 +32,8 @@ import { parseCodexImportPayload, upsertCodexAccount, readCodexAccounts } from '
 import { generateAuthUrl, exchangeAuthCode, normalizeOauthFlavor } from '../oauth/oauth-auth-url.mjs'
 import { sessionKeyToOAuth, panelImportErrorPayload } from '../oauth/cookie-auth.mjs'
 import { enrichOauthIdentity } from '../oauth/oauth-identity.mjs'
+import { codexMailboxService } from '../oauth/codex-mailbox-service.mjs'
+import { openaiIdentityFromOauthTokens } from '../oauth/openai-jwt.mjs'
 import { generateCodexAuthUrl, exchangeCodexAuthCode } from '../oauth/codex-oauth.mjs'
 import {
   completeClaudeSetupToken,
@@ -82,7 +85,7 @@ import {
   standardSeedPolicy,
 } from '../protocol/seed-policy.mjs'
 
-import { runVmTestChat, resolveTestModels, syncCodexCatalog } from './vm-test-chat.mjs'
+import { resolveVmTestBaseUrl, runVmTestChat, resolveTestModels, syncCodexCatalog } from './vm-test-chat.mjs'
 import { VmTestScheduleError } from './vm-test-schedule.mjs'
 import { readCatalogSync, syncClaudeCatalog, syncGptCatalog } from './catalog-monitor.mjs'
 import { setPriceOverride, listPriceOverrides, syncModelsDev } from './price-catalog.mjs'
@@ -402,6 +405,13 @@ async function commitImportedCodexVm({
 }) {
   const wasCodex = isCodexVm(existing)
   const previousPolicy = existing.policy && typeof existing.policy === 'object' ? existing.policy : {}
+  const mailbox = codexMailboxService(cfg.paths.project)
+  mailbox.cancel(existing.id)
+  try {
+    const savedMailbox = mailbox.status(existing.id)
+    const identity = openaiIdentityFromOauthTokens(account)
+    if (savedMailbox.configured && String(identity.email || account.email || '').toLowerCase() !== savedMailbox.email) mailbox.remove(existing.id)
+  } catch { /* Manual import remains available when the old mailbox configuration is unreadable. */ }
   const saved = upsertCodexAccount(cfg.paths.project, existing.id, account, { replaceCredentials: true })
   existing.platform = 'openai'
   existing.family = 'codex'
@@ -1382,6 +1392,85 @@ export function createPanelHandler(ctx) {
         denyIfUserMissesProxy(req, res, { proxyPool, json, path: p })
       ) {
         return true
+      }
+      const credentialPoolMatch = p.match(/^\/api\/panel\/login-credentials(?:\/(import|cred-[a-f0-9-]{36})(?:\/(reveal))?)?$/)
+      if (credentialPoolMatch) {
+        res.setHeader('Cache-Control', 'no-store')
+        const service = codexMailboxService(cfg.paths.project)
+        const owner = { id: req.panelUserId || 'master', admin: panelIdentity(req).role === 'admin' }
+        const action = credentialPoolMatch[1] || ''
+        try {
+          if (req.method === 'GET' && !action) {
+            const visible = filterVmsForPanel(listVms(cfg.paths.project), { role: panelIdentity(req).role, userId: req.panelUserId })
+            return json(res, 200, panel.ok({ credentials: service.poolList(owner, visible.map(vm => vm.id)) }))
+          }
+          if (req.method === 'POST' && action === 'import') {
+            const body = await readBody(req, 600_000)
+            return json(res, 200, panel.ok(service.poolImport(body.text, owner)))
+          }
+          if (req.method === 'POST' && credentialPoolMatch[2] === 'reveal') return json(res, 200, panel.ok(service.poolReveal(action, owner)))
+          if (req.method === 'DELETE' && action.startsWith('cred-') && !credentialPoolMatch[2]) {
+            service.poolRemove(action, owner)
+            return json(res, 200, panel.ok({ removed: true }))
+          }
+          return json(res, 405, { ok: false, error: { code: 'method_not_allowed', message: 'method_not_allowed' } })
+        } catch (error) {
+          const code = /^[a-z_]{1,60}$/.test(error.code || '') ? error.code : 'credential_pool_failed'
+          return json(res, Number(error.status) || 400, { ok: false, error: { code, message: code } })
+        }
+      }
+      // Uses the panel operator/role and slot-ownership checks above.
+      const mailboxMatch = p.match(/^\/api\/panel\/vms\/([^/]+)\/oauth\/(microsoft-mailbox|login)(?:\/(start|cancel|verify|remote|control|session|bind|subscription))?$/)
+      if (mailboxMatch) {
+        const id = mailboxMatch[1]
+        const action = mailboxMatch[3] || ''
+        const generic = mailboxMatch[2] === 'login'
+        const owner = { id: req.panelUserId || 'master', admin: panelIdentity(req).role === 'admin' }
+        res.setHeader('Cache-Control', 'no-store')
+        const service = codexMailboxService(cfg.paths.project)
+        try {
+          if (generic && req.method === 'POST' && action === 'bind') {
+            const body = await readBody(req, 1024)
+            return json(res, 200, panel.ok(service.bind(id, body.credential_id, owner)))
+          }
+          if (generic && req.method === 'POST' && action === 'remote') return json(res, 202, panel.ok(service.remote(id)))
+          if (generic && req.method === 'POST' && action === 'control') {
+            const body = await readBody(req, 16_384)
+            if (body.op === 'session') return json(res, 400, { ok: false, error: { code: 'use_session_export', message: 'use_session_export' } })
+            return json(res, 200, panel.ok(await service.control(id, body)))
+          }
+          if (generic && req.method === 'POST' && action === 'session') {
+            const session = await service.session(id)
+            res.setHeader('Content-Disposition', `attachment; filename="${id}-chatgpt-session.json"`)
+            return json(res, 200, session)
+          }
+          if (generic && req.method === 'POST' && action === 'subscription') {
+            const body = await readBody(req, 1024)
+            return json(res, 200, panel.ok(await service.subscription(id, body)))
+          }
+          if (req.method === 'GET' && !action) return json(res, 200, panel.ok(service.status(id)))
+          if (req.method === 'POST' && !action) {
+            const body = await readBody(req, 8192)
+            return json(res, 200, panel.ok(service.save(id, { ...body, mode: generic ? body.mode : 'microsoft_mailbox' })))
+          }
+          if (req.method === 'POST' && action === 'start') {
+            const body = await readBody(req, 1024)
+            return json(res, 202, panel.ok(service.start(id, { activateEmpty: body.activate_empty === true })))
+          }
+          if (req.method === 'POST' && action === 'cancel') return json(res, 200, panel.ok(service.cancel(id)))
+          if (req.method === 'POST' && action === 'verify') {
+            const body = await readBody(req, 1024)
+            return json(res, 200, panel.ok(service.verificationCode(id, body.code)))
+          }
+          if (req.method === 'DELETE' && !action) {
+            service.remove(id)
+            return json(res, 200, panel.ok({ removed: true }))
+          }
+          return json(res, 405, { ok: false, error: { code: 'method_not_allowed', message: 'Method not allowed' } })
+        } catch (error) {
+          const code = /^[a-z_]{1,60}$/.test(error.code || '') ? error.code : 'mailbox_operation_failed'
+          return json(res, Number(error.status) || 400, { ok: false, error: { code, message: code } })
+        }
       }
       if ((req.method === 'GET' || req.method === 'PUT') && p === '/api/panel/onboarding') {
         if (req.method === 'PUT') {
@@ -3027,6 +3116,23 @@ export function createPanelHandler(ctx) {
         return json(res, 200, detail)
       }
       // POST /api/panel/vms/:id/probe
+      if (p === '/api/panel/model-fingerprints') {
+        if (panelIdentity(req).role !== 'admin') return json(res, 403, { ok: false, error: { code: 'forbidden', message: 'Administrator required' } })
+        const service = modelFingerprintService(cfg)
+        if (req.method === 'GET') return json(res, 200, panel.ok(service.status(url.searchParams.get('vmId'), url.searchParams.get('model'))))
+        if (req.method === 'POST') {
+          const body = await readBody(req)
+          try {
+            const started = service.start({ vmId: body.vmId, model: body.model, kind: body.kind })
+            return json(res, started.busy ? 409 : 202, started.busy
+              ? { ok: false, error: { code: 'probe_busy', message: '已有指纹任务正在运行，请等待完成。' } }
+              : panel.ok(started))
+          } catch (error) {
+            return json(res, 400, { ok: false, error: { code: 'invalid_fingerprint_request', message: error.message } })
+          }
+        }
+        if (req.method === 'DELETE') return json(res, 200, panel.ok(service.cancel()))
+      }
       if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/probe$/.test(p)) {
         const id = p.split('/')[4]
         const result = await panel.buildProbeOne({
@@ -3114,7 +3220,7 @@ export function createPanelHandler(ctx) {
           max_tokens: body.max_tokens,
           reasoning_effort: body.reasoning_effort || body.effort,
           timeoutMs: body.timeout_ms || body.timeoutMs,
-          baseUrl: `http://127.0.0.1:${cfg.port}`,
+          baseUrl: resolveVmTestBaseUrl(cfg),
           apiKey: cfg.api_key,
           accountQuota,
         })
@@ -3350,7 +3456,8 @@ export function createPanelHandler(ctx) {
         try {
           fs.rmSync(path.join(cfg.paths.project, 'vms', id), { recursive: true, force: true })
         } catch {}
-        fs.unlinkSync(vmPath)
+        codexMailboxService(cfg.paths.project).remove(id)
+          fs.unlinkSync(vmPath)
         invalidateVmSlotReadCache(cfg.paths.project, id)
         try {
           vmTestSchedule.remove(id)
@@ -3482,6 +3589,7 @@ export function createPanelHandler(ctx) {
           const prev = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
           prev.id = prev.id || id
           const slotDir = path.join(cfg.paths.project, 'vms', id)
+          codexMailboxService(cfg.paths.project).remove(id)
           const removed = []
           for (const file of [
             path.join(slotDir, 'codex-credentials.json'),
@@ -4906,31 +5014,9 @@ export function createPanelHandler(ctx) {
         }
         const vm = getVm(cfg.paths.project, id)
         if (isCodexVm(vm)) {
-          const first = readCodexAccounts(cfg.paths.project, id)[0] || {}
-          const refreshToken = String(first.refresh_token || '').trim()
-          if (!refreshToken) {
-            return json(res, 400, {
-              ok: false,
-              error: { code: 'credential_mode_unsupported', message: 'GPT 槽没有 refresh_token，请重新导入 OAuth' },
-            })
-          }
-          const tok = await refreshCodexAccessToken({
-            refreshToken,
-            proxyUrl: hostProxyUrlForVm(vm),
-          })
-          if (!tok.ok) {
-            return json(res, 502, {
-              ok: false,
-              error: { code: tok.error || 'refresh_failed', message: 'GPT OAuth 刷新失败，请重新导入' },
-            })
-          }
-          upsertCodexAccount(cfg.paths.project, id, {
-            access_token: tok.access_token,
-            refresh_token: tok.refresh_token,
-            id_token: tok.id_token || first.id_token,
-            expires_at: tok.expires_at || first.expires_at,
-          })
-          return json(res, 200, panel.ok({ ok: true, refreshed: true, platform: 'openai' }))
+          const data = await refreshWorkerCredentialForVm({ vmId: id, vmPath, vm, force: true })
+          if (!data.ok) return json(res, 502, { ok: false, error: data.error, data })
+          return json(res, 200, panel.ok(data))
         }
         if (isApiKeyMode(vm?.claude?.mode)) {
           return json(res, 400, {

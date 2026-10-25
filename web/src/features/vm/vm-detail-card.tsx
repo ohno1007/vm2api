@@ -64,6 +64,8 @@ import {
 } from '@/features/vm/vm-owner'
 import { useVmPerms } from '@/features/vm/vm-perms'
 import { VmSchedulingBlock } from '@/features/vm/vm-scheduling'
+import { CodexBrowserPanel } from './codex-browser-panel'
+import { CodexPasswordPanel } from './codex-password-panel'
 
 function Section({
   title,
@@ -132,6 +134,12 @@ function CardBody({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
         </div>
       </div>
       <p className='text-xs text-muted-foreground'>{restrictionCopy(vm)}</p>
+      {codex && perms.credential ? (
+        <>
+          <CodexPasswordPanel vm={vm} />
+          <CodexBrowserPanel vm={vm} />
+        </>
+      ) : null}
 
       <section className='min-w-0 rounded-lg border px-3 py-2.5'>
         <VmUsagePanel vm={vm} accounts={accounts} />

@@ -1,12 +1,11 @@
 /**
- * Periodic OAuth refresh for every slot that still has a refresh token,
- * including operator 调度关. Inference no longer reaches those workers, so
- * Go Ensure never runs unless Node asks. Fatal refresh is written onto
- * vm.json as refresh_error → evaluateAccount shows 无效凭证.
- */
+ * Periodic OAuth refresh for enabled slots with refresh tokens.
+ * Operator-disabled slots remain idle until scheduling is enabled again.
+ * Fatal refresh is written onto vm.json as refresh_error. */
 import { isLocalEgressProxy } from '../vm/egress.mjs'
 import { proxyBlockedReason } from '../vm/proxy-policy.mjs'
 import { hasRefreshPresence, needsRefresh } from './oauth-credentials.mjs'
+import { isCodexVm } from '../vm/vm-kind.mjs'
 
 export const DEFAULT_CREDENTIAL_REFRESH = Object.freeze({
   enabled: true,
@@ -53,7 +52,7 @@ export function vmHasProxyPath(vm) {
 }
 
 export function isCredentialRefreshTarget(vm) {
-  if (!vm?.id) return false
+  if (!vm?.id || vm.schedulable === false) return false
   if (!hasRefreshPresence(vm.claude) && !vm.has_refresh) return false
   const status = String(vm.status || '').toLowerCase()
   if (HARD_DOWN.has(status)) return false
@@ -77,6 +76,7 @@ export function shouldForceRefresh(vm) {
 
 export function needsScheduledRefresh(vm, now = Date.now()) {
   if (vm?.refresh_error || vm?.claude?.refresh_error) return false
+  if (isCodexVm(vm)) return needsRefresh(vm.expires_at, now, 10 * 60_000)
   return needsRefresh(vm?.expires_at || vm?.claude?.expires_at, now)
 }
 
@@ -113,6 +113,9 @@ export function createCredentialRefreshMonitor(opts = {}) {
       const items = []
       if (due.length && typeof opts.refreshOne === 'function') {
         await mapPool(due, config.concurrency, async (vm) => {
+          const current = (opts.listTargets?.() || []).find((item) => item.id === vm.id)
+          if (!isCredentialRefreshTarget(current)) return
+          vm = current
           try {
             const result = await opts.refreshOne(vm, config)
             items.push({

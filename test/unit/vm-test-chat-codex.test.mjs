@@ -8,6 +8,7 @@ import {
   listTestableModels,
   resolveTestModels,
   runVmTestChat,
+  resolveVmTestBaseUrl,
   syncCodexCatalog,
   testChatCredentialMode,
 } from '../../src/lib/admin/vm-test-chat.mjs'
@@ -43,7 +44,7 @@ function seedRouting(root) {
   fs.writeFileSync(path.join(configDir, 'routing.json'), JSON.stringify({}))
 }
 
-async function startLoopbackServer(t, respond) {
+async function startLoopbackServer(t, respond, host = '127.0.0.1') {
   const calls = []
   const server = http.createServer(async (req, res) => {
     const chunks = []
@@ -60,10 +61,10 @@ async function startLoopbackServer(t, respond) {
   })
   await new Promise((resolve, reject) => {
     server.once('error', reject)
-    server.listen(0, '127.0.0.1', resolve)
+    server.listen(0, host, resolve)
   })
   t.after(() => new Promise((resolve) => server.close(resolve)))
-  return { baseUrl: `http://127.0.0.1:${server.address().port}`, calls }
+  return { baseUrl: resolveVmTestBaseUrl({ host, port: server.address().port }), calls }
 }
 
 test('listTestableModels(openai) hides Claude ids', () => {
@@ -81,7 +82,8 @@ test('testChatCredentialMode reports Codex slots as codex', () => {
   assert.equal(testChatCredentialMode({ platform: 'openai', family: 'codex' }), 'codex')
 })
 
-test('runVmTestChat Codex slot loopbacks /v1/responses and never /v1/messages', async (t) => {
+for (const listenHost of ['127.0.0.2', '::1']) {
+test(`runVmTestChat Codex uses configured listener ${listenHost} for /v1/responses`, async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-testchat-codex-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   seedCodexVm(root)
@@ -98,7 +100,7 @@ test('runVmTestChat Codex slot loopbacks /v1/responses and never /v1/messages', 
       status: 'completed',
       kin: { vm_id: 'vm-codex-01' },
     },
-  }))
+  }), listenHost)
 
   const result = await runVmTestChat({
     projectRoot: root,
@@ -133,6 +135,8 @@ test('runVmTestChat Codex slot loopbacks /v1/responses and never /v1/messages', 
   assert.ok(result.log.some((l) => /\/v1\/responses/.test(l.message)))
   assert.ok(!result.log.some((l) => /\/v1\/messages/.test(l.message)))
 })
+
+}
 
 test('runVmTestChat Codex slot refreshes OAuth after wrapped 401', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-testchat-codex-401-'))
@@ -316,4 +320,18 @@ test('runVmTestChat Codex ENOENT is not rewritten as wrap cli-hop', async (t) =>
   assert.equal(result.ok, false)
   assert.match(result.error.message, /Codex kernel 未就绪/)
   assert.doesNotMatch(result.error.message, /wrap cli-hop 未就绪/)
+})
+
+test('resolveVmTestBaseUrl handles explicit bind addresses, wildcards and custom ports', () => {
+  const cases = [
+    [{}, 'http://127.0.0.1:8787'],
+    [{ host: '172.18.0.1', port: 8787 }, 'http://172.18.0.1:8787'],
+    [{ host: '127.0.0.1', port: 9876 }, 'http://127.0.0.1:9876'],
+    [{ host: '0.0.0.0', port: 9000 }, 'http://127.0.0.1:9000'],
+    [{ host: '::', port: 9000 }, 'http://[::1]:9000'],
+    [{ host: '[::]', port: 9000 }, 'http://[::1]:9000'],
+    [{ host: '::1', port: 9000 }, 'http://[::1]:9000'],
+    [{ host: '2001:db8::1', port: 9000 }, 'http://[2001:db8::1]:9000'],
+  ]
+  for (const [cfg, expected] of cases) assert.equal(resolveVmTestBaseUrl(cfg), expected)
 })

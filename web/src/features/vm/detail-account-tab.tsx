@@ -12,6 +12,7 @@ import { fmtExpiresAt, fmtNum, pct } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { isCodexVm } from '@/lib/vm-kind'
 import { claudeTier, credExpiry } from '@/lib/vm-status'
+import { useNow } from '@/hooks/use-now'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { TabsContent } from '@/components/ui/tabs'
@@ -40,6 +41,7 @@ import {
 } from '@/features/vm/probe-status'
 import { VmPackageButton } from '@/features/vm/vm-package-dialog'
 import { useVmPerms } from '@/features/vm/vm-perms'
+import { SubscriptionExpiry } from './subscription-expiry'
 
 type VmAccountTabProps = {
   id: string
@@ -84,6 +86,7 @@ export function VmAccountTab(props: VmAccountTabProps) {
     onCredentialCommitted,
   } = props
   const perms = useVmPerms()
+  const now = useNow()
   const blocked = vm.can_import_credential === false
   const gpt = isCodexVm(vm)
   const remote = isRemoteVm(vm)
@@ -109,7 +112,7 @@ export function VmAccountTab(props: VmAccountTabProps) {
               <CardTitle className='text-sm'>导入凭证</CardTitle>
             </CardHeader>
             <CardContent className='pt-0'>
-              {blocked ? (
+              {blocked && !gpt ? (
                 <div className='space-y-3'>
                   <p className='text-sm text-muted-foreground'>
                     该槽需要已绑定且健康的 SOCKS5 才能换票。
@@ -159,7 +162,13 @@ export function VmAccountTab(props: VmAccountTabProps) {
               ) : null}
               {gpt ? (
                 <Field label='订阅到期（以凭证为准）' compact>
-                  {fmtExpiresAt(vm.chatgpt_subscription_active_until)}
+                  <SubscriptionExpiry
+                    vm={vm}
+                    now={now}
+                    full
+                    showLabel={false}
+                    className='text-sm'
+                  />
                 </Field>
               ) : null}
               {credType === 'apikey' ? (
@@ -174,9 +183,27 @@ export function VmAccountTab(props: VmAccountTabProps) {
                   <Field label='Refresh' compact>
                     {vm.has_refresh ? '已绑定' : '—'}
                   </Field>
-                  <Field label='过期' compact>
+                  <Field label={gpt ? '令牌过期' : '过期'} compact>
                     {fmtExpiresAt(vm.expires_at)}
                   </Field>
+                  {gpt ? (
+                    <>
+                      <Field label='自动刷新' compact>
+                        {vm.refresh_error
+                          ? '授权失效，请重新授权'
+                          : vm.auto_refresh_enabled
+                            ? '已开启 · 令牌到期前自动刷新'
+                            : vm.has_refresh
+                              ? '已关闭'
+                              : '未绑定 Refresh Token'}
+                      </Field>
+                      <Field label='最近刷新' compact>
+                        {vm.refreshed_at
+                          ? fmtExpiresAt(vm.refreshed_at)
+                          : '暂无刷新记录'}
+                      </Field>
+                    </>
+                  ) : null}
                 </>
               )}
               {gpt ? null : (

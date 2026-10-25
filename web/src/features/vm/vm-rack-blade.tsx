@@ -41,6 +41,7 @@ import {
   zoneOf,
   type BladeState,
 } from '@/features/vm/vm-rack-model'
+import { SubscriptionExpiry } from './subscription-expiry'
 
 export type RackSize = 's' | 'm' | 'l'
 
@@ -463,7 +464,10 @@ export const VmBlade = memo(function VmBlade({
           />
         ) : null}
       </div>
-      <SpecLine vm={vm} />
+      <div className='space-y-1'>
+        <SpecLine vm={vm} />
+        <SubscriptionExpiry vm={vm} now={now} />
+      </div>
       {state === 'live' ? (
         <BladeUsage vm={vm} accounts={accounts} now={now} />
       ) : state === 'unprobed' ? (

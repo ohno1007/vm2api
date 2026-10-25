@@ -46,7 +46,7 @@ function syncStatus(status, { added = [], error = null } = {}) {
 // listVms strips credentials; the exec needs the raw record's OAuth block.
 function claudeCatalogTargets(projectRoot) {
   return listVms(projectRoot)
-    .filter((vm) => vm?.id && !isCodexVm(vm) && !HARD_DOWN.has(String(vm.status || '').toLowerCase()))
+    .filter((vm) => vm?.id && vm.schedulable !== false && !isCodexVm(vm) && !HARD_DOWN.has(String(vm.status || '').toLowerCase()))
     .map((vm) => getVm(projectRoot, vm.id))
     .filter((vm) => vm && vmHasClaudeCredential(vm) && vmHasProxyPath(vm))
 }
@@ -60,6 +60,7 @@ export async function syncClaudeCatalog({ projectRoot, runOauth = runSlotOauth }
   let lastError = null
   for (const vm of targets) {
     if (successes >= CLAUDE_ACCOUNTS_PER_SYNC) break
+    if (getVm(projectRoot, vm.id)?.schedulable === false) continue
     const exec = { vmId: vm.id, homeDir: path.join(projectRoot, 'vms', vm.id, 'cli-home'), oauth: vm.claude, vm }
     const res = await runOauth(exec, 'models', { timeoutMs: 30_000 })
     const list = Array.isArray(res?.body?.data) ? res.body.data : null

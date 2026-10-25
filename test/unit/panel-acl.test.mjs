@@ -14,8 +14,8 @@ const serverSrc = [
   fs.readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../src/server.mjs'), 'utf8'),
 ].join('\n')
 
-test('user sees vm / proxies / keys / billing / logs / statistics', () => {
-  assert.deepEqual(viewsForRole('user'), ['vm', 'proxies', 'keys', 'billing', 'logs', 'statistics'])
+test('user sees vm / proxies / credentials / keys / billing / logs / statistics', () => {
+  assert.deepEqual(viewsForRole('user'), ['vm', 'proxies', 'credentials', 'keys', 'billing', 'logs', 'statistics'])
   assert.deepEqual(viewsForRole('super'), ['overview', 'cluster', 'logs', 'statistics', 'vm'])
   assert.equal(canViewPage('admin', 'statistics'), true)
   assert.equal(canViewPage('user', 'vm'), true)
@@ -42,7 +42,7 @@ test('user can manage owned vm/proxy/key surfaces and nothing else', () => {
   assert.equal(authorizePanelRoute('POST', '/api/panel/vms/package', 'user').ok, true)
   assert.equal(authorizePanelRoute('GET', '/api/panel/vms/vm-01/package', 'user').ok, false)
   assert.equal(authorizePanelRoute('PUT', '/api/panel/vms/vm-01/package', 'user').ok, false)
-  assert.equal(authorizePanelRoute('DELETE', '/api/panel/vms/vm-01', 'user').ok, false)
+  assert.equal(authorizePanelRoute('DELETE', '/api/panel/vms/vm-01', 'user').ok, true)
   assert.equal(authorizePanelRoute('GET', '/api/panel/proxies', 'user').ok, true)
   assert.equal(authorizePanelRoute('GET', '/api/panel/api-keys', 'user').ok, true)
   assert.equal(authorizePanelRoute('GET', '/api/panel/api-keys/key_a/stats', 'user').ok, true)

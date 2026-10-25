@@ -10,7 +10,6 @@ import {
   validateTelemetryRoutingPatch,
 } from '../../src/lib/vm/worker-telemetry.mjs'
 import { syncWorkerTelemetry } from '../../src/lib/vm/vm-runtime.mjs'
-import { FULL_ENV_KEYS } from '../../src/lib/identity/telemetry-env.mjs'
 import { slotRuntimeOwner } from '../../src/lib/oauth/oauth-credentials.mjs'
 
 const MACHINE = 'aa'.repeat(32)
@@ -218,7 +217,7 @@ test('syncWorkerTelemetry chowns the replaced worker.json to the slot uid', () =
   }
 })
 
-test('sidecar env uses observed shell/runtimes and never guest hardware', () => {
+test('sidecar env uses observed hardware instead of workstation profile', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-tel-hw-'))
   writeOfficialHome(root, 'vm-02')
   const vm = {
@@ -258,27 +257,19 @@ test('sidecar env uses observed shell/runtimes and never guest hardware', () => 
   assert.equal(out.identity.env.shell, 'zsh')
   assert.equal(out.identity.env.package_managers, 'apt,pacman')
   assert.equal(out.identity.env.runtimes, 'bun,node')
-  // Official CLI env carries none of these; they stay on the panel card only.
-  for (const key of [
-    'cpu_model',
-    'cpu_cores',
-    'memory_bytes',
-    'root_disk',
-    'mac',
-    'dmi_manufacturer',
-    'dmi_product',
-    'dmi_version',
-    'dmi_family',
-    'dmi_serial',
-    'dmi_uuid',
-  ]) {
-    assert.equal(Object.hasOwn(out.identity.env, key), false, key)
-    assert.equal(Object.hasOwn(out.identity, key), false, key)
-  }
-  assert.deepEqual(
-    Object.keys(out.identity.env).filter((key) => !FULL_ENV_KEYS.includes(key)),
-    [],
-  )
+  assert.equal(out.identity.env.cpu_model, 'Intel(R) Xeon(R) CPU')
+  assert.equal(out.identity.cpu_model, 'Intel(R) Xeon(R) CPU')
+  assert.equal(out.identity.cpu_cores, 4)
+  assert.equal(out.identity.env.cpu_cores, 4)
+  assert.equal(out.identity.env.memory_bytes, 4294967296)
+  assert.equal(out.identity.env.root_disk, '/dev/vda2')
+  assert.equal(out.identity.env.mac, '52:54:00:11:22:33')
+  assert.equal(out.identity.env.dmi_manufacturer, 'Dell Inc.')
+  assert.equal(out.identity.env.dmi_product, 'OptiPlex 7090')
+  assert.equal(out.identity.env.dmi_version, '1.0')
+  assert.equal(out.identity.env.dmi_family, 'OptiPlex')
+  assert.equal(out.identity.env.dmi_serial, 'ABC123')
+  assert.equal(out.identity.env.dmi_uuid, '11111111-2222-3333-4444-555555555555')
   assert.equal(out.identity.env.linux_kernel, '6.8.0-guest')
   fs.rmSync(root, { recursive: true, force: true })
 })

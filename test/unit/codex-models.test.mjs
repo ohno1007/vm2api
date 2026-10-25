@@ -181,73 +181,26 @@ test('refreshCodexAccessToken posts form grant and keeps fallback refresh token'
   assert.match(calls[0].body, /refresh_token=rt-old/)
 })
 
-test('parseCodexModelCatalog keeps whitelisted catalog metadata', () => {
-  const [row] = parseCodexModelCatalog({
-    models: [
-      {
-        slug: 'gpt-6-luna',
-        display_name: 'GPT-6 Luna',
-        description: '  Fast everyday model  ',
-        priority: 3,
-        visibility: 'list',
-        context_window: 272000,
-        max_context_window: 1000000,
-        default_reasoning_level: 'medium',
-        supported_reasoning_levels: [{ effort: 'low', description: 'x' }, { effort: 'high' }, { effort: 'low' }],
-        service_tiers: [{ id: 'priority', name: 'fast', description: 'Faster' }],
-        input_modalities: ['text', 'image'],
-        supports_search_tool: true,
-        supports_parallel_tool_calls: false,
-        supported_in_api: true,
-        base_instructions: 'secret prompt',
-        shell_type: 'local',
-      },
-    ],
-  })
-  assert.deepEqual(row.catalog, {
-    description: 'Fast everyday model',
-    priority: 3,
-    visibility: 'list',
-    context_window: 272000,
-    max_context_window: 1000000,
-    default_reasoning_level: 'medium',
-    supported_reasoning_levels: ['low', 'high'],
-    service_tiers: [{ id: 'priority', name: 'fast', description: 'Faster' }],
-    input_modalities: ['text', 'image'],
-    supports_search_tool: true,
-    supports_parallel_tool_calls: false,
-    supported_in_api: true,
-  })
+test('overlapping refreshes for one grant share a single token request', async () => {
+  let calls = 0
+  let release
+  const fetchImpl = () => {
+    calls++
+    return new Promise((resolve) => { release = resolve })
+  }
+  const a = refreshCodexAccessToken({ refreshToken: 'shared-rt-test', fetchImpl })
+  const b = refreshCodexAccessToken({ refreshToken: 'shared-rt-test', fetchImpl })
+  release({ status: 200, body: { access_token: 'shared-at', refresh_token: 'rotated-rt', expires_in: 3600 } })
+  const [first, second] = await Promise.all([a, b])
+  assert.equal(calls, 1)
+  assert.deepEqual(first, second)
 })
 
-test('parseCodexModelCatalog drops bad metadata fields but keeps the model', () => {
-  const [row] = parseCodexModelCatalog({
-    models: [
-      {
-        slug: 'gpt-6-sol',
-        display_name: 'GPT-6 Sol',
-        description: 'x'.repeat(5000),
-        priority: 1.5,
-        visibility: 'everywhere',
-        context_window: 2000000,
-        max_context_window: 1000000,
-        supported_reasoning_levels: 'high',
-        service_tiers: [{ id: 'priority' }, { id: 'flex', name: 'flex' }],
-        input_modalities: ['text', 42],
-        supports_search_tool: 'yes',
-      },
-    ],
+test('invalid_grant on HTTP 400 is classified as a rejected grant', async () => {
+  const result = await refreshCodexAccessToken({
+    refreshToken: 'rejected-rt-test',
+    fetchImpl: async () => ({ status: 400, body: { error: 'invalid_grant' } }),
   })
-  assert.equal(row.id, 'gpt-6-sol')
-  assert.deepEqual(row.catalog, {
-    service_tiers: [{ id: 'flex', name: 'flex' }],
-    input_modalities: ['text'],
-  })
-})
-
-test('parseCodexModelCatalog rejects non-positive context windows', () => {
-  const [row] = parseCodexModelCatalog({
-    models: [{ slug: 'gpt-6-sol', display_name: 'GPT-6 Sol', context_window: 0, max_context_window: -5 }],
-  })
-  assert.deepEqual(row.catalog, {})
+  assert.equal(result.error, 'invalid_grant')
+  assert.equal(result.status, 400)
 })

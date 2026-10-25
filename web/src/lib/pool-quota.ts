@@ -11,8 +11,8 @@ import { accountUsable, claudeTier, fablePlanDenied } from '@/lib/vm-status'
  *   无效、已过期、被吊销（revoke）一律不计入容量，也不计入消耗。
  *   调度关（off）、冷却、警告、限制中的凭证额度仍然真实存在，照常计入。
  * - 容量按「账号数」计：每张可用凭证贡献 1 个满窗口。
- * - 消耗为各凭证已用比例之和（账号当量）。未探测的凭证计容量、消耗按 0，
- *   在分段图里以虚线空段标出，不冒充「确认可用」。
+ * - 消耗为各凭证已用比例之和（账号当量）。未探测的窗口不计容量或余量，
+ *   在分段图里以虚线空段标出，等待实际探测。
  * - Fable 容量只含 Max 档且未被拒 Fable 权限、未被 Fable 封禁的凭证——
  *   Pro 号没有 Fable 窗口，计入只会稀释这个数。
  */
@@ -21,7 +21,7 @@ export type PoolQuotaSeg = {
   name: string
   /** 已用 0-100，超量截断到 100（单凭证消耗不可能超过自身窗口）。 */
   usedPct: number
-  /** false = 该窗口没有任何实测数据（未探测），消耗按 0 计。 */
+  /** false = 该窗口没有实测数据，不计容量、消耗或余量。 */
   probed: boolean
   /** 该窗口的重置时刻 ms；未知为 0。倒计时由渲染层按当前时间算。 */
   resetAt: number
@@ -52,8 +52,9 @@ function buildWindow(
   segs: PoolQuotaSeg[]
 ): PoolWindow {
   segs.sort((a, b) => b.usedPct - a.usedPct)
-  const usedAccounts = segs.reduce((s, x) => s + x.usedPct / 100, 0)
-  const capacity = segs.length
+  const measured = segs.filter((s) => s.probed)
+  const usedAccounts = measured.reduce((s, x) => s + x.usedPct / 100, 0)
+  const capacity = measured.length
   const remainAccounts = capacity - usedAccounts
   return {
     key,
@@ -78,10 +79,12 @@ export function poolEligible(vm: Vm): boolean {
 
 /** 该窗口有没有实测用量。缺省时 `usedPctOf` 回 0，不能当成「确认没用过」。 */
 export function windowProbed(vm: Vm, window: '5h' | '7d'): boolean {
+  const valid = (value: unknown) =>
+    value != null && value !== '' && Number.isFinite(Number(value))
   return Boolean(
-    (window === '5h' ? vm.utilization_5h : vm.utilization_7d) != null ||
+    valid(window === '5h' ? vm.utilization_5h : vm.utilization_7d) ||
     vm.codex_usage?.windows?.some(
-      (w) => w.id === window && w.used_percent != null
+      (w) => w.id === window && valid(w.used_percent)
     )
   )
 }

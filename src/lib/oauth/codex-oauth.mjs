@@ -168,6 +168,10 @@ export async function exchangeCodexAuthCode({ sessionId, code, proxyUrl, vmId, f
   }
 }
 
+export function discardCodexAuthSession(sessionId) {
+  sessions.delete(sessionId)
+}
+
 export function resetCodexAuthUrlSessions() {
   sessions.clear()
 }

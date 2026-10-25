@@ -11,11 +11,14 @@ import { Textarea } from '@/components/ui/textarea'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import type { CommitResult } from '@/features/vm/credential-panel'
 import { vmQueryOptions } from '@/features/vm/queries'
+import { CodexMailboxPanel } from './codex-mailbox-panel'
 
-type CodexImportMode = 'oauth' | 'access_token' | 'refresh_token' | 'json'
+type CodexImportMode =
+  'oauth' | 'access_token' | 'refresh_token' | 'json' | 'microsoft_mailbox'
 
 const MODES: { id: CodexImportMode; label: string }[] = [
   { id: 'oauth', label: 'OAuth' },
+  { id: 'microsoft_mailbox', label: '微软邮箱' },
   { id: 'json', label: '账号文件' },
 ]
 
@@ -218,11 +221,14 @@ export function CodexCredentialPanel({
   return (
     <div className='space-y-3'>
       <Hint>
-        对齐 Codex Desktop：OAuth 授权或账号文件（auth.json）。不要用 Claude
-        sessionKey、Setup Token 或 Console Key。一槽一号。
+        对齐 Codex Desktop：支持微软邮箱自动授权、OAuth
+        授权或账号文件（auth.json）。不要用 Claude sessionKey、Setup Token 或
+        Console Key。一槽一号。
       </Hint>
       <Seg value={mode} onChange={setMode} disabled={busy} />
-      {mode === 'oauth' ? (
+      {mode === 'microsoft_mailbox' ? (
+        <CodexMailboxPanel vm={vm} onCommitted={onCommitted} />
+      ) : mode === 'oauth' ? (
         linkReady ? (
           <div className='space-y-2'>
             <div className='flex flex-wrap items-center gap-2'>

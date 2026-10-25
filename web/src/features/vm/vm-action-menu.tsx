@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import type { Vm } from '@/types/panel-vm'
 import {
   BarChart3,
@@ -10,12 +10,16 @@ import {
   Play,
   RefreshCw,
   RotateCcw,
+  CreditCard,
   Trash2,
   Undo2,
   UserRoundPlus,
 } from 'lucide-react'
+import { toast } from 'sonner'
+import { downloadChatgptSession } from '@/lib/codex-session-export'
 import { canRefreshCredential, credTypeOf } from '@/lib/cred-type'
 import { cn } from '@/lib/utils'
+import { isCodexVm } from '@/lib/vm-kind'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -30,6 +34,8 @@ import { useVmActions } from '@/features/vm/vm-actions-context'
 import { canReclaimVm } from '@/features/vm/vm-owner'
 import { VmPackageDialog } from '@/features/vm/vm-package-dialog'
 import { useVmPerms } from '@/features/vm/vm-perms'
+import { loginLabel } from './codex-password-panel'
+import { CodexSubscriptionDialog } from './codex-subscription-dialog'
 
 /** 无法刷新时给出原因，与详情页 refreshBlocked 文案一致。 */
 export function refreshBlockedReason(vm: Vm): string {
@@ -53,10 +59,26 @@ export function VmActionMenu({
   const actions = useVmActions()
   const me = useQuery(meQueryOptions())
   const [packOpen, setPackOpen] = useState(false)
+  const [subscriptionOpen, setSubscriptionOpen] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const qc = useQueryClient()
   const blocked = refreshBlockedReason(vm)
   const restricted = restrictionTitle(vm)
   const admin = me.data?.role === 'admin'
   const perms = useVmPerms()
+  const codex = isCodexVm(vm)
+  async function exportSession() {
+    setExporting(true)
+    try {
+      await downloadChatgptSession(vm.id)
+      toast.success('已导出此槽位的 ChatGPT Session')
+    } catch (error) {
+      toast.error(loginLabel((error as Error).message))
+    } finally {
+      setExporting(false)
+      void qc.invalidateQueries({ queryKey: ['codex-login', vm.id] })
+    }
+  }
   return (
     <>
       <DropdownMenu>
@@ -73,7 +95,7 @@ export function VmActionMenu({
         </DropdownMenuTrigger>
         <DropdownMenuContent
           align='end'
-          className='w-44'
+          className='w-56'
           onClick={(e) => e.stopPropagation()}
         >
           {perms.test ? (
@@ -107,6 +129,26 @@ export function VmActionMenu({
               <Download />
               打包 JSON
             </DropdownMenuItem>
+          ) : null}
+          {codex && perms.credential ? (
+            <>
+              <DropdownMenuItem
+                disabled={exporting || vm.schedulable === false}
+                title={
+                  vm.schedulable === false
+                    ? '槽位已关闭调度，保持静置'
+                    : undefined
+                }
+                onSelect={() => void exportSession()}
+              >
+                <Download />
+                {exporting ? '正在导出 Session…' : '导出 ChatGPT Session'}
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setSubscriptionOpen(true)}>
+                <CreditCard />
+                自动付费续订
+              </DropdownMenuItem>
+            </>
           ) : null}
           {admin && actions.openAssignOwner ? (
             <DropdownMenuItem
@@ -159,6 +201,9 @@ export function VmActionMenu({
           ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
+      {codex && perms.credential && subscriptionOpen ? (
+        <CodexSubscriptionDialog vm={vm} onOpenChange={setSubscriptionOpen} />
+      ) : null}
       {admin ? (
         <VmPackageDialog
           vmId={vm.id}

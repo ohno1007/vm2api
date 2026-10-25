@@ -697,6 +697,9 @@ export function createHealthProbeMonitor(opts = {}) {
     }
 
     const probeVm = async (vm) => {
+      const current = (opts.listTargets?.() || []).find((item) => item.id === vm.id)
+      if (!current || current.schedulable === false) return { ok: false, error: 'slot_resting' }
+      vm = current
       try {
         const result = await opts.runChat(vm, real)
         if (result?.ok) return { ok: true, result }

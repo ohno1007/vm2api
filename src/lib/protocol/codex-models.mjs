@@ -7,6 +7,7 @@
 import fetch from 'node-fetch'
 import fs from 'node:fs'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { createProxyAgent } from '../vm/proxy-agent.mjs'
 import { isSyncableGptCatalogId } from './gpt-ids.mjs'
 
@@ -251,10 +252,24 @@ export function makeProxyFetch(proxyUrl, timeoutMs = 15000, { maxMs = 30000 } = 
 }
 
 /**
- * User-initiated Codex OAuth refresh. Not used by background model probes.
+ * Codex OAuth refresh shared by user actions and scheduled credential renewal.
  * @param {{ refreshToken?: string, proxyUrl?: string, fetchImpl?: Function, timeoutMs?: number }} opts
  */
-export async function refreshCodexAccessToken(opts = {}) {
+const pendingRefreshes = new Map()
+
+export function refreshCodexAccessToken(opts = {}) {
+  const token = String(opts.refreshToken || '').trim()
+  if (!token) return Promise.resolve({ ok: false, error: 'missing_refresh_token' })
+  const key = createHash('sha256').update(token).digest('hex')
+  let pending = pendingRefreshes.get(key)
+  if (!pending) {
+    pending = performCodexRefresh(opts).finally(() => pendingRefreshes.delete(key))
+    pendingRefreshes.set(key, pending)
+  }
+  return pending
+}
+
+async function performCodexRefresh(opts = {}) {
   const refreshToken = String(opts.refreshToken || '').trim()
   if (!refreshToken) return { ok: false, error: 'missing_refresh_token' }
   const fetchFn = opts.fetchImpl || makeProxyFetch(opts.proxyUrl, opts.timeoutMs)
@@ -276,6 +291,10 @@ export async function refreshCodexAccessToken(opts = {}) {
     })
     const status = Number(res?.status) || 0
     const payload = await readFetchBody(res)
+    const errorCode = typeof payload?.error === 'string' ? payload.error : payload?.error?.code
+    if (status >= 400 && /^(invalid_grant|refresh_token_reused)$/.test(errorCode || '')) {
+      return { ok: false, error: errorCode, status }
+    }
     if (status === 401 || status === 403) {
       return { ok: false, error: 'refresh_rejected', status }
     }

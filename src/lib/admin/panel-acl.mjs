@@ -13,6 +13,7 @@ export const PANEL_VIEWS = [
   'import',
   'specs',
   'proxies',
+  'credentials',
   'models',
   'risk',
   'system',
@@ -29,7 +30,7 @@ export const PANEL_VIEWS = [
 ]
 
 const ROLE_VIEWS = {
-  user: ['vm', 'proxies', 'keys', 'billing', 'logs', 'statistics'],
+  user: ['vm', 'proxies', 'credentials', 'keys', 'billing', 'logs', 'statistics'],
   super: ['overview', 'cluster', 'logs', 'statistics', 'vm'],
   admin: PANEL_VIEWS.slice(),
 }
@@ -202,7 +203,7 @@ function userVmPathAllowed(method, path) {
     )
   }
   if (method === 'PUT') return rest === 'test-schedule' || rest === 'oauth/credential'
-  if (method === 'DELETE') return rest === 'test-schedule'
+  if (method === 'DELETE') return rest === 'test-schedule' || (rest === 'oauth/microsoft-mailbox' || rest === 'oauth/login')
   return false
 }
 
@@ -234,6 +235,7 @@ function isUserAllowed(method, path) {
   if (m === 'GET' && (USER_EXACT_GET.has(p) || isRequestLogPath(p) || LOG_STATS_GET.has(p))) return true
   if (m === 'PUT' && p === '/api/panel/onboarding') return true
   if (m === 'POST' && USER_EXACT_POST.has(p)) return true
+  if (/^\/api\/panel\/login-credentials(?:\/(?:import|cred-[a-f0-9-]{36})(?:\/reveal)?)?$/.test(p)) return ['GET', 'POST', 'DELETE'].includes(m)
   if (p.startsWith('/api/panel/vms')) return userVmPathAllowed(m, p)
   if (p.startsWith('/api/panel/proxies')) return userProxyPathAllowed(m, p)
   if (p.startsWith('/api/panel/api-keys')) return userKeyPathAllowed(m, p)

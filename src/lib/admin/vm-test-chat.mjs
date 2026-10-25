@@ -50,7 +50,14 @@ import {
 
 const DEFAULT_PROMPT = 'hello'
 const DEFAULT_MAX_TOKENS = 64
-const DEFAULT_BASE_URL = 'http://127.0.0.1:8787'
+/** Internal probes must reach the configured listener, including specific bind addresses. */
+export function resolveVmTestBaseUrl({ host, port } = {}) {
+  let address = String(host || '127.0.0.1').trim().replace(/^\[|\]$/g, '')
+  if (!address || address === '0.0.0.0') address = '127.0.0.1'
+  if (address === '::') address = '::1'
+  const authority = address.includes(':') ? `[${address}]` : address
+  return `http://${authority}:${Number(port) || 8787}`
+}
 
 export function normalizeTestPlatform(platform) {
   const s = String(platform || '')
@@ -118,7 +125,7 @@ export function testModelsView(platform) {
 }
 
 function listCodexVmsForCatalog(projectRoot, vm) {
-  if (vm && isCodexVm(vm)) return [vm]
+  if (vm && isCodexVm(vm)) return vm.schedulable === false ? [] : [vm]
   const dir = path.join(projectRoot, 'vms')
   if (!fs.existsSync(dir)) return []
   const out = []
@@ -126,7 +133,7 @@ function listCodexVmsForCatalog(projectRoot, vm) {
     if (!name.endsWith('.json') || name === 'active.json') continue
     try {
       const raw = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'))
-      if (raw?.id && isCodexVm(raw)) out.push(raw)
+      if (raw?.id && raw.schedulable !== false && isCodexVm(raw)) out.push(raw)
     } catch {}
   }
   return out
@@ -190,6 +197,7 @@ export async function syncCodexCatalog({
   let usedVm = null
   let lastError = null
   for (const target of targets) {
+    if (getVm(projectRoot, target.id)?.schedulable === false) continue
     const direct = isLocalEgressProxy(target.proxy)
     const proxyUrl = hostProxyUrlForVm(target)
     if (!proxyUrl && !fetchImpl && !direct) {
@@ -207,8 +215,9 @@ export async function syncCodexCatalog({
       let access = account.access_token || target.codex?.access_token
       const accountId = account.chatgpt_account_id || target.codex?.chatgpt_account_id
       const refreshToken = account.refresh_token || target.codex?.refresh_token
-      const fetchOnce = () =>
-        fetchChatgptModelCatalog({
+      const fetchOnce = () => {
+        if (getVm(projectRoot, target.id)?.schedulable === false) return { ok: false, error: 'slot_resting' }
+        return fetchChatgptModelCatalog({
           accessToken: access,
           accountId,
           proxyUrl,
@@ -216,8 +225,9 @@ export async function syncCodexCatalog({
           direct,
           catalogVersion: catalogVersion.version,
         })
+      }
       let live = await fetchOnce()
-      if (live.error === 'upstream_auth' && rotate && refreshToken) {
+      if (live.error === 'upstream_auth' && rotate && refreshToken && getVm(projectRoot, target.id)?.schedulable !== false) {
         const tok = await refreshCodexAccessToken({ refreshToken, proxyUrl, fetchImpl })
         if (!tok.ok) {
           lastError = {
@@ -783,7 +793,7 @@ function freshLoopbackRequest(rawUrl, init = {}) {
   return new Promise((resolve, reject) => {
     const req = http.request(
       {
-        hostname: target.hostname,
+        hostname: target.hostname.replace(/^\[|\]$/g, ''),
         port: target.port || 80,
         path: `${target.pathname}${target.search}`,
         method: init.method || 'GET',
@@ -884,13 +894,20 @@ export async function runVmTestChat(opts = {}) {
       duration_ms: 0,
     })
   }
-  const baseUrl = String(opts.baseUrl || DEFAULT_BASE_URL).replace(/\/$/, '')
+  const baseUrl = String(
+    opts.baseUrl || resolveVmTestBaseUrl({ host: process.env.HOST, port: process.env.PORT }),
+  ).replace(/\/$/, '')
 
   const vm = getVm(projectRoot, vmId)
   if (!vm) {
     return done({ ok: false, error: { code: 'vm_not_found', message: `vm not found: ${vmId}` }, log, duration_ms: 0 })
   }
 
+  if (vm.schedulable === false) {
+    return done({ ok: false, vm_id: vmId, status: 409,
+      error: { code: 'slot_resting', message: 'Slot scheduling is disabled; enable scheduling before testing' },
+      log, duration_ms: 0 })
+  }
   push('info', `开始测试凭证槽 ${vm.name || vmId}`)
   push('info', `状态 running=${vm.status === 'running'} schedulable=${vm.schedulable !== false}`)
   const routing = loadRouting(projectRoot)
@@ -1097,7 +1114,7 @@ export async function runVmTestChat(opts = {}) {
     'info',
     `入站 ua=${headers['user-agent'] || '—'} beta=${headers['anthropic-beta'] || '(none)'} identity=${identitySource}`,
   )
-  push('info', `loopback POST ${v1Path} pin=x-kin-vm:${vmId}（站点用户路径，不直调 worker）`)
+  push('info', `loopback POST ${v1Path} target=${baseUrl} pin=x-kin-vm:${vmId}（站点用户路径，不直调 worker）`)
 
   const timeoutMs = Math.min(Math.max(Number(opts.timeoutMs) || 90000, 10000), 180000)
   let result

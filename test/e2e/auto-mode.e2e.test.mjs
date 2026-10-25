@@ -7,6 +7,7 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { classifierFixture, parseClassifierXmlBlock } from '../fixtures/auto-mode.mjs'
+import { computeClaudeCodeCch, projectClaudeCodeCchText } from '../../src/lib/identity/cch.mjs'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
 import { createRespond, readBody } from '../../src/lib/http/respond.mjs'
 import { prepareClassifierBody } from '../../src/lib/protocol/request-purpose.mjs'
@@ -231,6 +232,7 @@ async function harness(t, layout = 'zero', cliPath = cli) {
     ANTHROPIC_API_KEY: 'local-fixture-key',
     ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstream.address().port}`,
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+    CLAUDE_CODE_ATTRIBUTION_HEADER: '0',
     DISABLE_TELEMETRY: '1',
     DISABLE_ERROR_REPORTING: '1',
     NO_PROXY: '127.0.0.1,localhost',
@@ -402,6 +404,9 @@ for (const layout of ['zero', 'identity'])
         assert.equal(response.content[0].text, text)
         assert.equal(response.stop_sequence, stage === 'xml_s1' ? input.stop_sequences[0] : null)
         const wire = h.captured.at(-1)
+        assert.match(wire.system[0].text, /^x-anthropic-billing-header:.*cc_version=.*cc_entrypoint=.*cch=[0-9a-f]{5};/)
+        const digest = wire.system[0].text.match(/cch=([0-9a-f]{5});/)[1]
+        assert.equal(digest, computeClaudeCodeCch(Buffer.from(projectClaudeCodeCchText(JSON.stringify(wire)))))
         assert.deepEqual(wire.thinking, { type: 'disabled' })
         assert.equal(wire.temperature, 0)
         assert.equal(wire.max_tokens, input.max_tokens)

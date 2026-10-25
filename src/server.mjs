@@ -10,6 +10,7 @@
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
+import { modelFingerprintService } from './lib/admin/model-fingerprint.mjs'
 import { loadConfig, reloadActiveVm, routingConfigFile } from './lib/core/config.mjs'
 import {
   extractApiKey,
@@ -38,7 +39,7 @@ import { normalizeOfficialCcConfig } from './lib/oauth/official-cc-bootstrap.mjs
 import { invalidateLiveCredentialCache } from './lib/admin/panel-live-credentials.mjs'
 import { normalizeHealthProbeConfig, createHealthProbeMonitor, HEALTH_REAL_HEADER } from './lib/admin/health-probe.mjs'
 import { normalizeNotifyConfig, createNotifyMonitor, dispatchNotify } from './lib/admin/notify.mjs'
-import { runVmTestChat } from './lib/admin/vm-test-chat.mjs'
+import { resolveVmTestBaseUrl, runVmTestChat } from './lib/admin/vm-test-chat.mjs'
 import { VmTestScheduleRunner } from './lib/admin/vm-test-schedule.mjs'
 import { StickyRouter } from './lib/pool/sticky-router.mjs'
 import { setManualScheduleWins } from './lib/pool/schedule-policy.mjs'
@@ -91,6 +92,8 @@ import {
 } from './lib/oauth/oauth-credentials.mjs'
 import { normalizeCredentialMode } from './lib/oauth/credential-mode.mjs'
 import { ensureWorkerCredential } from './lib/transport/go-worker-client.mjs'
+import { codexMailboxService } from './lib/oauth/codex-mailbox-service.mjs'
+import { ensureCodexCredential } from './lib/oauth/codex-credential-refresh.mjs'
 import { stopAllRustKernels } from './lib/transport/rust-kernel-supervisor.mjs'
 import { createRespond, parseRequestUrl } from './lib/http/respond.mjs'
 import { corsHeadersForRequest } from './lib/http/cors.mjs'
@@ -455,7 +458,7 @@ healthMonitor = createHealthProbeMonitor({
       max_tokens: real.max_tokens,
       timeoutMs: real.timeout_ms,
       personaMode: 'overwrite',
-      baseUrl: `http://127.0.0.1:${cfg.port}`,
+      baseUrl: resolveVmTestBaseUrl(cfg),
       apiKey: cfg.api_key,
       unofficial: false,
       extraHeaders: { [HEALTH_REAL_HEADER]: '1' },
@@ -470,7 +473,7 @@ const vmTestSchedule = new VmTestScheduleRunner({
       projectRoot: cfg.paths.project,
       vmId,
       ...params,
-      baseUrl: `http://127.0.0.1:${cfg.port}`,
+      baseUrl: resolveVmTestBaseUrl(cfg),
       apiKey: cfg.api_key,
       accountQuota,
     }),
@@ -659,6 +662,17 @@ function publicCredentialRefreshResult(vmId, result, { force = false } = {}) {
 }
 
 async function refreshWorkerCredentialForVm({ vmId, vmPath, homeDir, vm, force = false }) {
+  if (isCodexVm(vm)) {
+    const result = await ensureCodexCredential(cfg.paths.project, vmId, { force })
+    if (result.ok) {
+      invalidateLiveCredentialCache()
+      try {
+        poolScheduler?.clearAuthCooldownFor?.(vmId, vmId)
+        poolScheduler?.clearGrantRevokeCooldownFor?.(vmId, vmId)
+      } catch {}
+    }
+    return result
+  }
   // Host RefreshIfNeeded is the credential writer. Slot workers only read AT.
   const result = await ensureWorkerCredential({ vmId, vm, homeDir }, { force: !!force })
 
@@ -1267,6 +1281,7 @@ function shutdown(signal) {
   } catch {}
   try {
     credentialRefreshMonitor?.stop?.()
+    codexMailboxService(cfg.paths.project).stop()
   } catch {}
   try {
     kernelWatchdog?.stop?.()
@@ -1276,6 +1291,7 @@ function shutdown(signal) {
   } catch {}
   try {
     usageProbeMonitor?.stop?.()
+    modelFingerprintService(cfg).stop()
   } catch {}
   try {
     catalogMonitor?.stop?.()
@@ -1319,6 +1335,7 @@ server.listen(cfg.port, cfg.host, () => {
   }
   try {
     credentialRefreshMonitor?.start?.({ immediate: true })
+    codexMailboxService(cfg.paths.project).startMonitor()
   } catch (e) {
     console.warn('[credential-refresh] start failed', e?.message || e)
   }
@@ -1340,6 +1357,7 @@ server.listen(cfg.port, cfg.host, () => {
   }
   try {
     usageProbeMonitor?.start?.({ immediate: true })
+    if (process.env.KIN_CRS_MOCK !== '1') modelFingerprintService(cfg).startMonitor()
   } catch (e) {
     console.warn('[usage-probe] start failed', e?.message || e)
   }

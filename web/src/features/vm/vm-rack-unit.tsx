@@ -21,6 +21,7 @@ import {
   zoneOf,
   type WindowReadout,
 } from '@/features/vm/vm-rack-model'
+import { SubscriptionExpiry } from './subscription-expiry'
 
 function MiniColumn({ w, now }: { w: WindowReadout; now: number }) {
   const reset = w.reset ? resetCountdown(w.reset, now) : null
@@ -101,15 +102,22 @@ export const VmUnit = memo(function VmUnit({
         </span>
         <TierBadge vm={vm} className='ms-auto h-4 px-1 text-[9.5px]' />
       </div>
-      <span
-        title={email || undefined}
-        className={cn(
-          'col-span-2 truncate text-[12.5px] font-semibold',
-          !email && 'font-medium text-muted-foreground'
-        )}
-      >
-        {slotCredentialLabel(vm, true)}
-      </span>
+      <div className='col-span-2 min-w-0'>
+        <span
+          title={email || undefined}
+          className={cn(
+            'block truncate text-[12.5px] font-semibold',
+            !email && 'font-medium text-muted-foreground'
+          )}
+        >
+          {slotCredentialLabel(vm, true)}
+        </span>
+        <SubscriptionExpiry
+          vm={vm}
+          now={now}
+          className='col-span-2 text-[10px]'
+        />
+      </div>
       {state === 'live' ? (
         <span className='flex items-end gap-1.5'>
           {vmWindows(vm).map((w) => (

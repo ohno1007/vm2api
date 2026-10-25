@@ -6,12 +6,22 @@ import path from 'node:path'
 import { atomicWriteJson, readJsonCached } from './vm-file.mjs'
 import { isCodexVm } from '../protocol/codex-route.mjs'
 import { buildCodexUsageView, extraToCodexSnapshot, hasSpendableCodexCredits } from '../protocol/codex-usage.mjs'
-import { openaiClaimsFromIdToken, openaiIdentityFromOauthTokens } from '../oauth/openai-jwt.mjs'
+import { decodeJwtPayload, openaiClaimsFromIdToken, openaiIdentityFromOauthTokens } from '../oauth/openai-jwt.mjs'
 
 export { isCodexVm }
 
 export function codexCredentialPath(projectRoot, vmId) {
   return path.join(projectRoot, 'vms', vmId, 'codex-credentials.json')
+}
+
+export function codexAccessExpiresAt(account = {}) {
+  const raw = account.expires_at
+  const n = Number(raw)
+  if (Number.isFinite(n) && n > 0) return n < 10_000_000_000 ? n * 1000 : n
+  const iso = typeof raw === 'string' ? Date.parse(raw) : NaN
+  if (Number.isFinite(iso) && iso > 0) return iso
+  const exp = Number(decodeJwtPayload(account.access_token)?.exp)
+  return Number.isFinite(exp) && exp > 0 ? exp * 1000 : 0
 }
 
 export function readCodexAccounts(projectRoot, vmId) {
@@ -274,6 +284,10 @@ export function enrichCodexAccountIdentity(account = {}) {
 export function upsertCodexAccount(projectRoot, vmId, patch = {}, { replaceCredentials = false } = {}) {
   const accounts = readCodexAccounts(projectRoot, vmId)
   const previous = { ...(accounts[0] || {}) }
+  if (replaceCredentials || patch.access_token || patch.refresh_token) {
+    delete previous.refresh_error
+    delete previous.refresh_error_at
+  }
   // Importing another account must not inherit the previous account's tokens or identity.
   // Refreshes still retain metadata when the provider omits it from the response.
   if (replaceCredentials) {
@@ -287,6 +301,7 @@ export function upsertCodexAccount(projectRoot, vmId, patch = {}, { replaceCrede
       'refresh_token',
       'id_token',
       'expires_at',
+      'refreshed_at',
     ]) {
       delete previous[key]
     }
@@ -354,7 +369,9 @@ export function summarizeCodexSlot(projectRoot, vm = {}) {
     has_token: hasAccess || hasRefresh,
     has_refresh: hasRefresh,
     email: first.email || vm.codex?.email || vm.email || null,
-    expires_at: first.expires_at || vm.codex?.expires_at || null,
+    expires_at: codexAccessExpiresAt(first) || vm.codex?.expires_at || null,
+    refreshed_at: first.refreshed_at || null,
+    refresh_error: first.refresh_error || null,
     chatgpt_account_id: first.chatgpt_account_id || vm.codex?.chatgpt_account_id || null,
     chatgpt_subscription_active_until: first.chatgpt_subscription_active_until || null,
     chatgpt_plan_type: first.chatgpt_plan_type || null,

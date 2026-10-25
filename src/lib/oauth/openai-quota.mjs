@@ -3,6 +3,7 @@
  * Upstream via slot SOCKS5 only. Mirrors sub2api OpenAIQuotaService,
  * without auto-reset, spark shadow, or agent-identity recovery.
  */
+import { recordMailboxAuthFailure } from './codex-mailbox-events.mjs'
 import crypto from 'node:crypto'
 import { getVm, syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
 import { isCodexVm } from '../vm/vm-kind.mjs'
@@ -98,6 +99,7 @@ export function extraFromRateLimit(rateLimit = {}, now = Date.now()) {
   const secondary = pickWindow(rateLimit.secondary_window || rateLimit.secondaryWindow)
   const extra = {
     codex_usage_updated_at: new Date(now).toISOString(),
+    codex_quota_probed_at: new Date(now).toISOString(),
   }
   if (primary) {
     extra.codex_primary_used_percent = primary.used_percent
@@ -240,6 +242,9 @@ function fail(code, message, status = 400, extra = {}) {
 }
 
 async function loadSlot(projectRoot, vmId) {
+  if (getVm(projectRoot, vmId)?.schedulable === false) {
+    return fail('slot_resting', 'Slot scheduling is disabled; enable scheduling before probing', 409)
+  }
   const vm = getVm(projectRoot, vmId)
   if (!vm) return { ok: false, error: 'vm_not_found', message: 'VM not found', status: 404 }
   if (!isCodexVm(vm)) {
@@ -402,7 +407,9 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
 export async function queryOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = true, policy = null } = {}) {
   const slot = await loadSlot(projectRoot, vmId)
   if (!slot.ok) return slot
-  return queryUpstream(slot, { fetchImpl, rotate, projectRoot, vmId, policy })
+  const result = await queryUpstream(slot, { fetchImpl, rotate, projectRoot, vmId, policy })
+  if (result.error === 'upstream_auth') recordMailboxAuthFailure(projectRoot, vmId)
+  return result
 }
 
 export async function resetOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = true, policy = null } = {}) {

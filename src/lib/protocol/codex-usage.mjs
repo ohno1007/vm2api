@@ -182,6 +182,7 @@ export function extraToCodexSnapshot(extra = {}) {
     secondary_reset_at: extra.codex_secondary_reset_at || extra.codex_5h_reset_at || null,
     primary_over_secondary_percent: num(extra.codex_primary_over_secondary_percent),
     updated_at: extra.codex_usage_updated_at || extra.updated_at || null,
+    quota_probed_at: extra.codex_quota_probed_at || null,
   }
 }
 

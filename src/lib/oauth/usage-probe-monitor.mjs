@@ -14,6 +14,7 @@ import { shouldProbeFable, usageProbeBackoffRemainingMs } from './crs-usage-prob
 import { hasRefreshPresence } from './oauth-credentials.mjs'
 import { vmHasProxyPath } from './credential-refresh-monitor.mjs'
 import { hasLiveExtraSample, hasOfficialUsageSample, parseResetMs } from '../pool/quota-window.mjs'
+import { isCodexVm } from '../vm/vm-kind.mjs'
 export const DEFAULT_USAGE_PROBE = Object.freeze({
   enabled: false,
   interval_sec: 60,
@@ -58,7 +59,7 @@ export function normalizeUsageProbeConfig(raw = {}) {
 }
 
 export function isUsageProbeTarget(vm) {
-  if (!vm?.id) return false
+  if (!vm?.id || vm.schedulable === false) return false
   if (!hasRefreshPresence(vm.claude) && !vm.has_refresh && !vm.has_token) return false
   const grantErr = String(vm.claude?.refresh_error || vm.refresh_error || '')
   if (/invalid_grant|refresh token not found/i.test(grantErr)) return false
@@ -101,6 +102,32 @@ export function latestUsageSampleMs(account = {}) {
     .map((value) => Date.parse(value || ''))
     .filter(Number.isFinite)
   return times.length ? Math.max(...times) : null
+}
+
+/** Codex quota is stored on the slot, separately from Claude account quotas. */
+export function isCodexUsageProbeDue(vm = {}, opts = {}) {
+  const now = opts.now ?? Date.now()
+  const staleMs = opts.staleMs ?? 300_000
+  const usage = vm.codex_usage || vm.codex?.usage || {}
+  const windows = usage.windows || []
+  const sampledAt = Date.parse(usage.snapshot?.updated_at || '')
+  // Responses (especially quota 429s) can refresh only one window. Their
+  // timestamp must not indefinitely postpone the independent /wham/usage read.
+  const quotaProbedAt = Date.parse(usage.snapshot?.quota_probed_at || '')
+  const freshnessAt = Object.hasOwn(usage.snapshot || {}, 'quota_probed_at') ? quotaProbedAt : sampledAt
+  const measured = (id) => windows.some((w) =>
+    w.id === id && w.used_percent != null && w.used_percent !== '' && Number.isFinite(Number(w.used_percent)),
+  )
+  if (!measured('5h') && !measured('7d')) return { due: true, reason: 'codex_never_sampled' }
+  if (!measured('5h') || !measured('7d')) return { due: true, reason: 'codex_window_unmeasured' }
+  if (windows.some((w) => {
+    const reset = Date.parse(w.reset_at || '')
+    return Number.isFinite(reset) && reset <= now && (!Number.isFinite(sampledAt) || sampledAt < reset)
+  })) return { due: true, reason: 'codex_window_elapsed' }
+  if (!Number.isFinite(freshnessAt) || now - freshnessAt >= staleMs) {
+    return { due: true, reason: 'codex_sample_stale' }
+  }
+  return { due: false, reason: 'codex_sample_fresh' }
 }
 
 /**
@@ -238,7 +265,10 @@ export function createUsageProbeMonitor(opts = {}) {
     const run = worker
       .then(async () => {
         try {
-          const result = await withTimeout(Promise.resolve(opts.probeOne(vm)), config.timeout_ms)
+          // Re-read after waiting for a worker: the operator may have disabled this slot.
+          const current = listTargets().find((item) => item.id === id)
+          if (!current) return { vm_id: id, ok: false, reason: 'not_target', source: null }
+          const result = await withTimeout(Promise.resolve(opts.probeOne(current)), config.timeout_ms)
           const ok = result?.ok !== false
           if (ok) backoff.delete(id)
           else {
@@ -248,7 +278,7 @@ export function createUsageProbeMonitor(opts = {}) {
               until: nowFn() + Math.min(STALE_USAGE_PROBE_GAP_MS, PROBE_BACKOFF_BASE_MS * 2 ** (failures - 1)),
             })
           }
-          return { vm_id: id, ok, reason, source: result?.source || (ok ? 'oauth-usage' : null) }
+          return { vm_id: id, ok, reason, source: result?.data?.source || result?.source || (ok ? 'oauth-usage' : null) }
         } catch (error) {
           const failures = (backoff.get(id)?.failures || 0) + 1
           backoff.set(id, {
@@ -294,7 +324,9 @@ export function createUsageProbeMonitor(opts = {}) {
             active = !!opts.isActive(vm, account)
           } catch {}
         }
-        const decision = isUsageProbeDue(account || {}, { now: nowFn(), staleMs, active })
+        const decision = isCodexVm(vm)
+          ? isCodexUsageProbeDue(vm, { now: nowFn(), staleMs })
+          : isUsageProbeDue(account || {}, { now: nowFn(), staleMs, active })
         if (!decision.due || typeof opts.probeOne !== 'function') {
           items.push({
             vm_id: vm.id,
@@ -304,7 +336,7 @@ export function createUsageProbeMonitor(opts = {}) {
           })
           continue
         }
-        const nextProbeAt = resetProbeAt(account, vm, config, nowFn())
+        const nextProbeAt = isCodexVm(vm) ? null : resetProbeAt(account, vm, config, nowFn())
         if (nextProbeAt != null && nextProbeAt > nowFn()) {
           items.push({
             vm_id: vm.id,

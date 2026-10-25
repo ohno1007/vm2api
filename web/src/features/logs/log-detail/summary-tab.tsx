@@ -38,6 +38,7 @@ import {
   isSuccessStatus,
   resolveModelAuditDisplay,
 } from '../log-display'
+import { ModelFingerprintPanel } from '../model-fingerprint'
 
 function SectionTitle({
   icon: Icon,
@@ -157,6 +158,7 @@ export function SummaryTab({
 
   return (
     <div className='space-y-6'>
+      <ModelFingerprintPanel row={row} />
       <div
         className={cn(
           'flex items-center gap-4 rounded-lg border p-4',

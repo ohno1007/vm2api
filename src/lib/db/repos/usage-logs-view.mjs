@@ -10,6 +10,7 @@
  */
 
 import { getDb } from '../database.mjs'
+import { latestModelFingerprint } from '../../admin/model-fingerprint.mjs'
 import { DEFAULT_MUTED_ERROR_CLASSES, enrichLogRow, excludeErrorClassSql } from '../../admin/error-class.mjs'
 import { reportTimezone, zonedDayStartMs } from '../../core/timezone.mjs'
 import {
@@ -178,6 +179,7 @@ export function toUsageLogRow(row, names, chain = []) {
     model: row.model ?? null,
     originalModel: row.requested_model ?? null,
     actualResponseModel: row.upstream_model ?? null,
+    modelFingerprint: latestModelFingerprint(row.vm_id, row.model || row.requested_model),
     modelMismatch: row.model_mismatch == null ? null : Number(row.model_mismatch),
     endpoint: row.path ?? null,
     protocol: row.protocol ?? null,

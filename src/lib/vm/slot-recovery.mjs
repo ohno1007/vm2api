@@ -575,7 +575,7 @@ export async function reviveDownSlots({
 }) {
   const revived = []
   for (const vm of vms) {
-    if (vm?.status !== 'running') continue
+    if (vm?.status !== 'running' || vm.schedulable === false) continue
     const nodeId = vmNodeId(vm)
     if (nodeId && !linkReady(nodeId)) continue
     let state
@@ -625,7 +625,7 @@ export function createSlotBridgeHealer({
   return async function healBridges(vms) {
     const seenProxies = new Set()
     for (const vm of vms) {
-      if (vm?.status !== 'running') continue
+      if (vm?.status !== 'running' || vm.schedulable === false) continue
       const nodeId = vmNodeId(vm)
       if (nodeId) {
         const manager = getCluster()

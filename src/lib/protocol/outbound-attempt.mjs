@@ -3,6 +3,7 @@
  * Tests compare envelopes from this module so admin paths cannot drift.
  */
 import { officialMessagesBody } from './anthropic-messages.mjs'
+import { moveToolResultImagesToTail } from './tool-result-image-tail.mjs'
 import {
   prepareAnthropicRequest,
   rewriteToolNames,
@@ -39,6 +40,7 @@ import {
   CRS_OFFICIAL_SYSTEM,
   CRS_OFFICIAL_CLI_SYSTEM,
   CRS_COMPACT_IDENTITY,
+  ensureBillingAttribution,
 } from '../identity/crs-persona.mjs'
 import { sealClaudeCodeCch } from '../identity/cch.mjs'
 import {
@@ -167,7 +169,6 @@ function stabilizeMessageBudgets(body) {
   })
   return changed ? { ...body, messages } : body
 }
-const OFFICIAL_CACHE = Object.freeze({ type: 'ephemeral' })
 
 function textOf(block) {
   if (typeof block === 'string') return block
@@ -296,26 +297,29 @@ export function prepareCliHopBody(
     preserveThinkingBlocks = false,
     preserveCallerEnvironment = false,
     autoCompactWindow = null,
+    toolResultImageTail = false,
     routing = null,
   } = {},
 ) {
   if (requestContext?.purpose === 'auto_mode_classifier') return prepareClassifierBody(canonicalBody, { stream })
-  if (preserveSystem) validateCacheBreakpoints(canonicalBody)
-  let body = officialMessagesBody(canonicalBody, { stream, preserveContentShape: true })
+  let body = removeCacheControlFields(officialMessagesBody(canonicalBody, { stream, preserveContentShape: true }))
   const windowTokens = Number(autoCompactWindow)
   if (Number.isInteger(windowTokens) && windowTokens >= 100_000 && windowTokens <= 1_000_000) {
     body.auto_compact_window = windowTokens
   }
   delete body.metadata
-  // Official family keeps the inbound system and its markers. Rewriting them
-  // into the persona template (billing / reporting / 1h) is what diverges from
-  // the captured Claude Code body: two ephemeral blocks, TTL omitted.
+  // Preserve selected prompt text, never caller-owned attribution or markers.
   if (!preserveSystem) {
     const leftover = stripCliOwnedSystem(body.system, { preserveCallerEnvironment })
     if (leftover == null) delete body.system
     else body.system = leftover
     body = stabilizeSystemBudget(body)
     body = stabilizeMessageBudgets(body)
+  }
+  if (preserveSystem && Array.isArray(body.system)) {
+    body.system = body.system.filter((block) => !/^\s*x-anthropic-billing-header:/i.test(systemBlockText(block)))
+  } else if (preserveSystem && typeof body.system === 'string') {
+    body.system = body.system.replace(/^\s*x-anthropic-billing-header:[^\r\n]*(?:\r?\n)?/gim, '')
   }
   // cli-node sends mid-conversation-system. Only models that reject the role need the lift.
   if (!modelSupportsMidConversationSystem(body.model)) body = liftMidConversationSystemMessages(body)
@@ -336,8 +340,8 @@ export function prepareCliHopBody(
   if (Object.prototype.hasOwnProperty.call(body, 'context_management')) delete body.context_management
   if (Object.prototype.hasOwnProperty.call(body, 'cache_control')) delete body.cache_control
   if (!requestContext) {
-    body = { ...body, system: officialSystemTemplate(body.system, cacheTtl) }
     body.messages = officialMessageMarker(body.messages, cacheTtl)
+    if (toolResultImageTail) body = moveToolResultImagesToTail(body)
     if (Array.isArray(body.tools)) body = { ...body, tools: stripEagerInputStreaming(body.tools) }
   }
   return body
@@ -552,7 +556,11 @@ export function prepareOutboundEnvelope({
     String(headers['anthropic-beta'] || '').split(','),
     displayed,
   ).join(',')
-  const body = sealClaudeCodeCch(sanitizeAnthropicBodyForBetaTokens(displayed, headers?.['anthropic-beta'] || ''), {
+  const attributed = ensureBillingAttribution(
+    sanitizeAnthropicBodyForBetaTokens(displayed, headers?.['anthropic-beta'] || ''),
+    { sessionId: sessionIdFromOutboundBody(displayed) || identity?.callerSessionId || '' },
+  )
+  const body = sealClaudeCodeCch(attributed, {
     enabled: routing?.compatibility?.cch_enabled !== false,
   })
   return { body, headers, toolNames: prepared.toolNames }

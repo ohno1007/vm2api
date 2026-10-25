@@ -17,6 +17,7 @@ import { Route as AuthenticatedAnthropicRouteImport } from './routes/_authentica
 import { Route as AuthenticatedApiRouteImport } from './routes/_authenticated/api'
 import { Route as AuthenticatedBillingRouteImport } from './routes/_authenticated/billing'
 import { Route as AuthenticatedClusterRouteImport } from './routes/_authenticated/cluster'
+import { Route as AuthenticatedCredentialsRouteImport } from './routes/_authenticated/credentials'
 import { Route as AuthenticatedDatabaseRouteImport } from './routes/_authenticated/database'
 import { Route as AuthenticatedImportRouteImport } from './routes/_authenticated/import'
 import { Route as AuthenticatedKeysRouteImport } from './routes/_authenticated/keys'
@@ -74,6 +75,12 @@ const AuthenticatedClusterRoute = AuthenticatedClusterRouteImport.update({
   path: '/cluster',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
+const AuthenticatedCredentialsRoute =
+  AuthenticatedCredentialsRouteImport.update({
+    id: '/credentials',
+    path: '/credentials',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
 const AuthenticatedDatabaseRoute = AuthenticatedDatabaseRouteImport.update({
   id: '/database',
   path: '/database',
@@ -170,6 +177,7 @@ export interface FileRoutesByFullPath {
   '/api': typeof AuthenticatedApiRoute
   '/billing': typeof AuthenticatedBillingRoute
   '/cluster': typeof AuthenticatedClusterRoute
+  '/credentials': typeof AuthenticatedCredentialsRoute
   '/database': typeof AuthenticatedDatabaseRoute
   '/import': typeof AuthenticatedImportRoute
   '/keys': typeof AuthenticatedKeysRoute
@@ -195,6 +203,7 @@ export interface FileRoutesByTo {
   '/api': typeof AuthenticatedApiRoute
   '/billing': typeof AuthenticatedBillingRoute
   '/cluster': typeof AuthenticatedClusterRoute
+  '/credentials': typeof AuthenticatedCredentialsRoute
   '/database': typeof AuthenticatedDatabaseRoute
   '/import': typeof AuthenticatedImportRoute
   '/keys': typeof AuthenticatedKeysRoute
@@ -223,6 +232,7 @@ export interface FileRoutesById {
   '/_authenticated/api': typeof AuthenticatedApiRoute
   '/_authenticated/billing': typeof AuthenticatedBillingRoute
   '/_authenticated/cluster': typeof AuthenticatedClusterRoute
+  '/_authenticated/credentials': typeof AuthenticatedCredentialsRoute
   '/_authenticated/database': typeof AuthenticatedDatabaseRoute
   '/_authenticated/import': typeof AuthenticatedImportRoute
   '/_authenticated/keys': typeof AuthenticatedKeysRoute
@@ -252,6 +262,7 @@ export interface FileRouteTypes {
     | '/api'
     | '/billing'
     | '/cluster'
+    | '/credentials'
     | '/database'
     | '/import'
     | '/keys'
@@ -277,6 +288,7 @@ export interface FileRouteTypes {
     | '/api'
     | '/billing'
     | '/cluster'
+    | '/credentials'
     | '/database'
     | '/import'
     | '/keys'
@@ -304,6 +316,7 @@ export interface FileRouteTypes {
     | '/_authenticated/api'
     | '/_authenticated/billing'
     | '/_authenticated/cluster'
+    | '/_authenticated/credentials'
     | '/_authenticated/database'
     | '/_authenticated/import'
     | '/_authenticated/keys'
@@ -386,6 +399,13 @@ declare module '@tanstack/react-router' {
       path: '/cluster'
       fullPath: '/cluster'
       preLoaderRoute: typeof AuthenticatedClusterRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/credentials': {
+      id: '/_authenticated/credentials'
+      path: '/credentials'
+      fullPath: '/credentials'
+      preLoaderRoute: typeof AuthenticatedCredentialsRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/database': {
@@ -515,6 +535,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedApiRoute: typeof AuthenticatedApiRoute
   AuthenticatedBillingRoute: typeof AuthenticatedBillingRoute
   AuthenticatedClusterRoute: typeof AuthenticatedClusterRoute
+  AuthenticatedCredentialsRoute: typeof AuthenticatedCredentialsRoute
   AuthenticatedDatabaseRoute: typeof AuthenticatedDatabaseRoute
   AuthenticatedImportRoute: typeof AuthenticatedImportRoute
   AuthenticatedKeysRoute: typeof AuthenticatedKeysRoute
@@ -540,6 +561,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedApiRoute: AuthenticatedApiRoute,
   AuthenticatedBillingRoute: AuthenticatedBillingRoute,
   AuthenticatedClusterRoute: AuthenticatedClusterRoute,
+  AuthenticatedCredentialsRoute: AuthenticatedCredentialsRoute,
   AuthenticatedDatabaseRoute: AuthenticatedDatabaseRoute,
   AuthenticatedImportRoute: AuthenticatedImportRoute,
   AuthenticatedKeysRoute: AuthenticatedKeysRoute,

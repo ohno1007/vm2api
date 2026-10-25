@@ -636,7 +636,7 @@ export class VmTestScheduleRunner {
       return
     }
     const schedule = this._stored(vmId)
-    if (!schedule?.enabled) return
+    if (!schedule?.enabled || this._vm(vmId)?.schedulable === false) return
     this.running.add(vmId)
     const startedAt = this.now()
     let result

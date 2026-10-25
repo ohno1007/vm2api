@@ -1062,6 +1062,10 @@ export async function buildProbeOne({
       }),
     )
   }
+  if (vm.schedulable === false) {
+    return fail(makeError({ type: ErrorType.INVALID_REQUEST, code: 'slot_resting',
+      message: 'Slot scheduling is disabled; enable scheduling before probing', status: 409 }))
+  }
   if (isCodexVm(vm)) {
     const result = await queryOpenaiQuota({
       projectRoot: cfg.paths.project,
@@ -1753,6 +1757,12 @@ function enrichVm(v, accountQuota, active, extras = {}) {
   const openAIGlobalPolicy = normalizeOpenAIQuotaPolicy(extras.routingConfig?.codex?.quota)
   const openAIEffective = isCodex ? effectiveOpenAIPolicy(v, openAIGlobalPolicy) : null
   const mergedQuota = isCodex ? v.codex_usage?.quota || {} : q
+  const codexSampleAt = v.codex_usage?.snapshot?.updated_at
+  const quotaProbe = isCodex
+    ? (codexSampleAt && (mergedQuota.utilization_5h != null || mergedQuota.utilization_7d != null)
+        ? { at: codexSampleAt, ok: true, source: 'codex-usage' }
+        : null)
+    : q.last_probe
   const u5 = mergedQuota.utilization_5h
   const u7 = mergedQuota.utilization_7d
   const merged = mergeVmProxy(v, extras.poolSnap || null, {
@@ -1811,8 +1821,8 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     hasRefresh: !!(v.has_refresh || workerCred?.has_refresh),
     schedulable: v.schedulable !== false,
     scheduleDisabledReason: v.schedule_disabled_reason || null,
-    lastProbe: q.last_probe || null,
-    probeSource: q.probe_source,
+    lastProbe: quotaProbe || null,
+    probeSource: isCodex ? quotaProbe?.source : q.probe_source,
     workerLastError: workerCred?.last_error || runtime?.worker_status?.last_error || runtime?.worker_status?.error,
     refreshError: runtime?.refresh_error || v.refresh_error || v.claude?.refresh_error,
     expiresAt,
@@ -1923,6 +1933,11 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     auth_scheme: v.auth_scheme || v.claude?.auth_scheme || null,
     can_claude_reset: isCodex ? false : v.can_claude_reset === true,
     has_refresh: !!(v.has_refresh || workerCred?.has_refresh),
+    auto_refresh_enabled: v.auto_refresh_enabled ??
+      (extras.routingConfig?.credential_refresh?.enabled !== false && !!(v.has_refresh || workerCred?.has_refresh)),
+    refresh_error: v.refresh_error || null,
+    chatgpt_subscription_active_until: isCodex ? v.chatgpt_subscription_active_until || null : null,
+    chatgpt_plan_type: isCodex ? v.chatgpt_plan_type || null : null,
     has_session_key: !!v.has_session_key,
     proxy: merged.proxy,
     proxy_id: merged.proxy?.id || v.proxy_id || v.proxy?.id || null,
@@ -1985,9 +2000,9 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     fable_cooldown_reason: fablePool.fable_cooldown_reason,
     extra_usage: q.extra_usage,
     fable: q.fable,
-    last_probe: q.last_probe,
-    last_probe_check: q.last_probe_check,
-    probe_source: q.probe_source,
+    last_probe: quotaProbe,
+    last_probe_check: isCodex ? quotaProbe : q.last_probe_check,
+    probe_source: isCodex ? quotaProbe?.source || null : q.probe_source,
     refreshed_at: v.refreshed_at || null,
     refresh_status: liveCred?.credential_state || runtime?.refresh_status || null,
     worker_credential: workerCred
