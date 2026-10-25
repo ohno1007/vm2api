@@ -245,8 +245,11 @@ export function renderOfficial303Body(
     agentStanding: agentStandingVar(compat, OFFICIAL_303_PRESET),
     withEnv: true,
     model,
+    compat,
+    preset: OFFICIAL_303_PRESET,
   })
-  let system = renderPersonaTemplate(resolvePersonaTemplate(OFFICIAL_303_PRESET, compat?.persona_templates), vars)
+  const template = resolvePersonaTemplate(OFFICIAL_303_PRESET, compat?.persona_templates)
+  let system = renderPersonaTemplate(template, vars)
 
   let messages = stripMessageMarkers(body.messages).map((message) =>
     message?.role === 'system' ? officialSystemContent(message) : message,

@@ -14,6 +14,7 @@ import {
   presetSeed,
   personaHideEnabled,
   presetFlagEnabled,
+  previewModelSentence,
   previewSystemBlocks,
   setPersonaHide,
   setPresetFlag,
@@ -200,6 +201,26 @@ describe('agent standing + system preview', () => {
       )
     ).toBe('absent')
   })
+  it('keeps the model sentence off until the preset switch is enabled', () => {
+    const edited = {
+      model_env_extra: {
+        'claude-sonnet-5-5': 'Sonnet extra.',
+        'claude-haiku-5-5': 'Haiku extra.',
+      },
+    }
+    const on = {
+      ...edited,
+      model_env_extra_presets: { official_303: true },
+    }
+    const block = (model: string, compat: Record<string, unknown>) =>
+      previewSystemBlocks(DEFAULT_PERSONA_TEMPLATES.official_303, {
+        model_sentence: previewModelSentence(compat, model, 'official_303'),
+      }).find((item) => item.id === 'env_extra')
+    expect(block('claude-sonnet-5-5', edited)).toBeUndefined()
+    expect(block('claude-sonnet-5-5', on)?.text).toBe('Sonnet extra.')
+    expect(block('claude-haiku-5-5', on)?.text).toBe('Haiku extra.')
+    expect(block('claude-opus-5-5', on)).toBeUndefined()
+  })
 
   it('omits generated env when the per-preset switch is off', () => {
     const isolated = {
@@ -263,6 +284,20 @@ describe('agent standing + system preview', () => {
     })
     expect(fullOff.some((block) => block.id === 'env_official')).toBe(false)
 
+    const selected = previewSystemBlocks(
+      [
+        ...DEFAULT_PERSONA_TEMPLATES.official_full.filter(
+          (block) => block.id !== 'env_official'
+        ),
+        {
+          id: 'env_timezone_only',
+          type: 'text',
+          text: '{{env_timezone_only}}',
+        },
+      ],
+      { ...vars, env_timezone_only: tokyo }
+    )
+    expect(selected[selected.length - 1]?.text).toBe(tokyo)
     expect(
       previewSystemBlocks(
         DEFAULT_PERSONA_TEMPLATES.official,

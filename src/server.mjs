@@ -102,7 +102,7 @@ import { createRoutingRuntime } from './lib/admin/routing-runtime.mjs'
 import { createImportCommit } from './lib/oauth/import-commit.mjs'
 import { createHandleProtocol } from './lib/protocol/handle-protocol.mjs'
 import { createResponsesWsHandler } from './lib/protocol/responses-ws.mjs'
-import { handleUserCountTokens, handleUserUsage } from './lib/protocol/user-count-tokens.mjs'
+import { handleUserUsage } from './lib/protocol/user-count-tokens.mjs'
 import { createPanelHandler } from './lib/admin/panel-routes.mjs'
 
 const FEATURES = [
@@ -115,7 +115,6 @@ const FEATURES = [
   'tools',
   'client-workspace',
   'api-direct-kernel',
-  'count_tokens',
   'account_usage',
 ]
 const LIMITATIONS = {
@@ -1115,7 +1114,6 @@ const server = http.createServer(async (req, res) => {
           chat_completions: '/v1/chat/completions',
           responses: '/v1/responses',
           messages: '/v1/messages',
-          count_tokens: '/v1/messages/count_tokens',
           usage: '/v1/usage',
           models: '/v1/models',
           intercept_rules: '/admin/intercept/rules',
@@ -1149,17 +1147,7 @@ const server = http.createServer(async (req, res) => {
       })
     }
     if (req.method === 'POST' && (p === '/v1/messages/count_tokens' || p === '/messages/count_tokens')) {
-      return await handleUserCountTokens(req, res, {
-        json,
-        readBody,
-        requireAuth,
-        apiKeyStore,
-        cfg,
-        stickyRouter,
-        accountQuota,
-        getPoolScheduler: () => poolScheduler,
-        getRoutingConfig: () => routingConfig,
-      })
+      return json(res, 404, { error: { message: 'not found: ' + p } })
     }
 
     if (req.method === 'POST' && (p === '/v1/chat/completions' || p === '/chat/completions')) {
@@ -1250,7 +1238,6 @@ const pub = {
     chat: publicEndpoint('/v1/chat/completions'),
     responses: publicEndpoint('/v1/responses'),
     messages: publicEndpoint('/v1/messages'),
-    count_tokens: publicEndpoint('/v1/messages/count_tokens'),
     usage: publicEndpoint('/v1/usage'),
     intercept_rules: publicEndpoint('/admin/intercept/rules'),
   },

@@ -15,7 +15,10 @@ import {
   personaHideEnabled,
   personaPresetLabel,
   presetFlagEnabled,
+  previewModelSentence,
   previewSystemBlocks,
+  selectedPreviewBlocks,
+  templateBlockEnabled,
   type RawBlock,
 } from '@/lib/persona-template'
 import { isCodexVm } from '@/lib/vm-kind'
@@ -87,6 +90,7 @@ export function SystemPreview({
     ),
   ].sort()
   const [picked, setPicked] = useState('')
+  const [previewModel, setPreviewModel] = useState('claude-sonnet-5-5')
   const timezone = zones.includes(picked) ? picked : zones[0] || 'UTC'
   // 等槽位列表回来再取常量，否则 env_official 会先按 UTC 渲染一遍。
   const vars = useQuery({
@@ -99,20 +103,28 @@ export function SystemPreview({
     !!standing &&
     presetFlagEnabled(compat, 'agent_standing_hide_presets', preset)
   const blocksMasked = personaHideEnabled(compat, preset, blocks)
+  const selected = selectedPreviewBlocks(blocks, compat, preset)
+  const timezoneOnly =
+    preset === 'official_full' &&
+    presetFlagEnabled(compat, 'persona_env_presets', preset) &&
+    !templateBlockEnabled(compat, preset, 'env_official')
   const env = envTimezoneText(timezone)
   const rendered = vars.data
     ? previewSystemBlocks(
-        dropLegacyAutoScope(preset, blocks),
+        dropLegacyAutoScope(preset, selected),
         applyPersonaEnvVars(
           {
             ...vars.data.vars,
             ...PREVIEW_REQUEST_VARS,
             timezone,
             env_timezone_only: env,
+            env_official: timezoneOnly ? env : vars.data.vars.env_official,
             env,
             agent_standing: agentStandingVar(compat, preset),
             caller_agent: withCaller ? PREVIEW_CALLER_AGENT : '',
             caller_system: withCaller ? PREVIEW_CALLER_SYSTEM : '',
+            model: previewModel,
+            model_sentence: previewModelSentence(compat, previewModel, preset),
           },
           compat,
           preset
@@ -168,6 +180,35 @@ export function SystemPreview({
                   {zone}
                 </SelectItem>
               ))}
+            </SelectContent>
+          </Select>
+          <Select value={previewModel} onValueChange={setPreviewModel}>
+            <SelectTrigger
+              size='sm'
+              className='h-7 cursor-pointer font-mono text-[11px]'
+              aria-label='预览用模型'
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {[
+                'claude-sonnet-5-5',
+                'claude-haiku-5-5',
+                'claude-opus-5-5',
+                ...Object.keys(
+                  compat.model_env_extra &&
+                    typeof compat.model_env_extra === 'object' &&
+                    !Array.isArray(compat.model_env_extra)
+                    ? (compat.model_env_extra as Record<string, string>)
+                    : {}
+                ),
+              ]
+                .filter((id, index, all) => all.indexOf(id) === index)
+                .map((id) => (
+                  <SelectItem key={id} value={id} className='font-mono text-xs'>
+                    {id}
+                  </SelectItem>
+                ))}
             </SelectContent>
           </Select>
           <label className='ml-auto flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground'>

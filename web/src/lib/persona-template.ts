@@ -115,6 +115,10 @@ export const PERSONA_TEMPLATE_VARS: [string, string][] = [
     'env_303',
     '官方 2.1.303 Environment 段（槽位身份 + 调用方 cwd / git / shell）',
   ],
+  [
+    'model_sentence',
+    '当前模型的官方模型句，追加在 Environment 之后，可在本页改写',
+  ],
 ]
 
 export const OVERLAY_TEMPLATE_VARS: [string, string][] = [
@@ -201,6 +205,13 @@ export const DEFAULT_PERSONA_TEMPLATES: Record<PersonaPreset, PersonaBlock[]> =
         cache_control: { type: 'ephemeral', ttl: '1h' },
       },
       {
+        id: 'env_extra',
+        note: 'Environment 之后的附加段。默认是当前模型句，可在本页改写或清空',
+        drop_if_empty: true,
+        type: 'text',
+        text: '{{model_sentence}}',
+      },
+      {
         id: 'caller_system',
         note: '调用方 system 仍追加在完整提示词之后',
         drop_if_empty: true,
@@ -264,6 +275,13 @@ export const DEFAULT_PERSONA_TEMPLATES: Record<PersonaPreset, PersonaBlock[]> =
         type: 'text',
         text: '{{agent_standing}}{{main_prompt_303}}',
         cache_control: { type: 'ephemeral' },
+      },
+      {
+        id: 'env_extra',
+        note: 'Environment 之后的附加段。默认是当前模型句，可在本页改写或清空',
+        drop_if_empty: true,
+        type: 'text',
+        text: '{{model_sentence}}',
       },
     ],
   }
@@ -389,9 +407,13 @@ export type PresetFlagField =
   | 'agent_standing_presets'
   | 'agent_standing_hide_presets'
   | 'persona_env_presets'
+  | 'model_env_extra_presets'
 
 function presetFlagDefault(field: PresetFlagField): boolean {
-  return field === 'agent_standing_presets' ? false : true
+  return field === 'agent_standing_presets' ||
+    field === 'model_env_extra_presets'
+    ? false
+    : true
 }
 
 export function presetFlagEnabled(
@@ -403,7 +425,8 @@ export function presetFlagEnabled(
   const map = compat?.[field]
   if (!map || typeof map !== 'object' || Array.isArray(map)) return defaultValue
   const value = (map as Record<string, unknown>)[preset]
-  if (field === 'agent_standing_presets') return value === true
+  if (field === 'agent_standing_presets' || field === 'model_env_extra_presets')
+    return value === true
   return value !== false
 }
 
@@ -763,6 +786,86 @@ export function applyPersonaEnvVars(
   const next = { ...vars }
   for (const name of PERSONA_ENV_VARS) next[name] = ''
   return next
+}
+/** 预览用的模型句。开关默认关；打开后才取当前草稿里该模型的句子。 */
+export function previewModelSentence(
+  compat: Record<string, unknown> | undefined,
+  model: string,
+  preset: PersonaPreset
+): string {
+  if (!presetFlagEnabled(compat, 'model_env_extra_presets', preset)) return ''
+  const map = compat?.model_env_extra
+  if (!map || typeof map !== 'object' || Array.isArray(map)) return ''
+  const id = model
+    .trim()
+    .toLowerCase()
+    .replace(/^.*\//, '')
+    .replace(/\[[^\]]*\]$/, '')
+    .replace(/-\d{8}$/, '')
+  const text = (map as Record<string, unknown>)[id]
+  return typeof text === 'string' ? text.trim() : ''
+}
+
+/** 官方完整档按块 id 选择。缺省全开；关 env_official 时预览改走时区段。 */
+export function templateBlockEnabled(
+  compat: Record<string, unknown> | undefined,
+  preset: PersonaPreset,
+  id: string
+): boolean {
+  if (preset !== 'official_full') return true
+  const selected = (
+    compat?.persona_block_presets as Record<string, unknown> | undefined
+  )?.[preset]
+  if (!selected || typeof selected !== 'object' || Array.isArray(selected))
+    return true
+  return (selected as Record<string, unknown>)[id] !== false
+}
+
+export function setTemplateBlock(
+  compat: Record<string, unknown>,
+  preset: PersonaPreset,
+  id: string,
+  on: boolean
+): Record<string, unknown> {
+  const raw = compat.persona_block_presets
+  const presets =
+    raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? { ...(raw as Record<string, unknown>) }
+      : {}
+  const current = presets[preset]
+  const selected =
+    current && typeof current === 'object' && !Array.isArray(current)
+      ? { ...(current as Record<string, unknown>) }
+      : {}
+  if (on) delete selected[id]
+  else selected[id] = false
+  if (Object.keys(selected).length) presets[preset] = selected
+  else delete presets[preset]
+  const next = { ...compat }
+  if (Object.keys(presets).length) next.persona_block_presets = presets
+  else delete next.persona_block_presets
+  return next
+}
+
+export function selectedPreviewBlocks(
+  blocks: readonly RawBlock[],
+  compat: Record<string, unknown> | undefined,
+  preset: PersonaPreset
+): RawBlock[] {
+  const selected = blocks.filter((block) =>
+    templateBlockEnabled(compat, preset, String(block.id ?? ''))
+  )
+  if (
+    preset !== 'official_full' ||
+    !presetFlagEnabled(compat, 'persona_env_presets', preset) ||
+    templateBlockEnabled(compat, preset, 'env_official')
+  ) {
+    return selected
+  }
+  return [
+    ...selected,
+    { id: 'env_timezone_only', type: 'text', text: '{{env_timezone_only}}' },
+  ]
 }
 
 const BILLING_VARS = ['billing', 'billing_semi']

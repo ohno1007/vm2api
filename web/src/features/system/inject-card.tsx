@@ -6,8 +6,11 @@ import {
   personaHideEnabled,
   presetFlagEnabled,
   resetAgentStanding,
+  selectedPreviewBlocks,
   setPersonaHide,
   setPresetFlag,
+  setTemplateBlock,
+  templateBlockEnabled,
   type PresetFlagField,
   type RawBlock,
 } from '@/lib/persona-template'
@@ -142,6 +145,14 @@ export function InjectCard({
           on={presetFlagEnabled(compat, 'persona_env_presets', preset)}
           onChange={flip('persona_env_presets')}
         />
+        <FlagRow
+          id='flag-model-extra'
+          label='模型附加句'
+          hint='默认关'
+          state='switch'
+          on={presetFlagEnabled(compat, 'model_env_extra_presets', preset)}
+          onChange={flip('model_env_extra_presets')}
+        />
       </FlagGroup>
 
       <div className='border-t border-border/60'>
@@ -219,6 +230,28 @@ export function InjectCard({
           </span>
         </div>
       </div>
+      {preset === 'official_full' ? (
+        <div className='space-y-1 border-t border-border/60 px-4 py-3'>
+          <div className='text-sm font-medium'>块选择</div>
+          {selectedPreviewBlocks(blocks, undefined, preset).map((block) => {
+            const id = String(block.id ?? '')
+            return (
+              <label
+                key={id}
+                className='flex items-center justify-between gap-3 text-xs'
+              >
+                <span className='font-mono'>{id}</span>
+                <Switch
+                  checked={templateBlockEnabled(compat, preset, id)}
+                  onCheckedChange={(on) =>
+                    onChange(setTemplateBlock(compat, preset, id, on))
+                  }
+                />
+              </label>
+            )
+          })}
+        </div>
+      ) : null}
     </Card>
   )
 }

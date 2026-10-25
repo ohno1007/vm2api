@@ -118,8 +118,23 @@ export function officialPromptShape(model = '') {
   return 'lean'
 }
 
-/** 2.1.303 model catalog entries for lean models (display_name, knowledge_cutoff). */
-const LEAN_MODEL_CATALOG = Object.freeze({
+/** 2.1.303 catalog (display_name, knowledge_cutoff). Full-prompt models still get this sentence. */
+const MODEL_SENTENCE_CATALOG = Object.freeze({
+  'claude-3-5-haiku': ['Haiku 3.5', 'February 2025'],
+  'claude-haiku-4-5': ['Haiku 4.5', 'February 2025'],
+  'claude-haiku-5-5': ['Haiku 5.5', 'June 2026'],
+  'claude-3-5-sonnet': ['Sonnet 3.5', 'January 2025'],
+  'claude-3-7-sonnet': ['Sonnet 3.7', 'January 2025'],
+  'claude-sonnet-4-0': ['Sonnet 4', 'January 2025'],
+  'claude-sonnet-4-5': ['Sonnet 4.5', 'January 2025'],
+  'claude-sonnet-4-6': ['Sonnet 4.6', 'August 2025'],
+  'claude-sonnet-5': ['Sonnet 5', 'January 2026'],
+  'claude-sonnet-5-5': ['Sonnet 5.5', 'June 2026'],
+  'claude-opus-4-0': ['Opus 4', 'January 2025'],
+  'claude-opus-4-1': ['Opus 4.1', 'January 2025'],
+  'claude-opus-4-5': ['Opus 4.5', 'May 2025'],
+  'claude-opus-4-6': ['Opus 4.6', 'May 2025'],
+  'claude-opus-4-7': ['Opus 4.7', 'January 2026'],
   'claude-opus-4-8': ['Opus 4.8', 'January 2026'],
   'claude-opus-5': ['Opus 5', 'May 2026'],
   'claude-opus-5-5': ['Opus 5.5', 'June 2026'],
@@ -129,11 +144,12 @@ const LEAN_MODEL_CATALOG = Object.freeze({
   'claude-mythos-5-1': ['Mythos 5.1', 'June 2026'],
 })
 
-/** Official `SZn` + `bZn`: unknown models name the id only and omit the cutoff. */
+/** Official runtime sentence. `auto` names the selector and omits the cutoff. Unknown ids do the same. */
 export function officialModelLine(model = '', { oneM = false } = {}) {
-  const id = canonicalPromptModel(model)
-  const exact = `${id}${oneM ? '[1m]' : ''}`
-  const entry = LEAN_MODEL_CATALOG[id]
+  const raw = canonicalPromptModel(model)
+  if (raw === 'auto') return 'You are powered by the model auto.'
+  const exact = `${raw}${oneM ? '[1m]' : ''}`
+  const entry = MODEL_SENTENCE_CATALOG[raw]
   if (!entry) return `You are powered by the model ${exact}.`
   const [name, cutoff] = entry
   return `You are powered by the model named ${name}${oneM ? ' (1M context)' : ''}. The exact model ID is ${exact}. Assistant knowledge cutoff is ${cutoff}.`
@@ -162,7 +178,7 @@ export function buildOfficial303Environment(env = {}, { model = '', oneM = false
   ]
   if (os) lines.push(` - OS Version: ${os}`)
   lines.push(OFFICIAL_303_ENV_UNTRUSTED)
-  return `${lines.join('\n')}\n\n${officialModelLine(model || env.modelId, { oneM })}`
+  return lines.join('\n')
 }
 
 const BILLING_RE = /^\s*x-anthropic-billing-header:/i

@@ -148,7 +148,7 @@ import {
   cacheTtlFromRouting,
   validateCacheBreakpoints,
 } from './cache-ttl.mjs'
-import { confirmCachePrefix, describeCacheContinuity, formatCacheBreak, trackCachePrefix } from './cache-prefix.mjs'
+import { confirmCachePrefix, describeCacheContinuity, formatCacheBreak, prepareCachePrefix } from './cache-prefix.mjs'
 import { ensureClaudeWebSearch, shouldInjectClaudeWebSearch } from './web-search.mjs'
 import { dispatchStreamInference } from '../transport/kernel-router.mjs'
 import { syncClaudeKernelConfigsFromFile } from '../transport/rust-kernel-supervisor.mjs'
@@ -1227,15 +1227,28 @@ export function createHandleProtocol(deps) {
     // Cache bypass is a client hint; only authenticated master-key probes may skip accounting.
     const healthReal = req.apiKeyKind === 'master' && isHealthRealBypass(req.headers)
     // Cache lives per account; a failover to another account starts cold by design.
-    const noteCachePrefix = (selected, sessionId, body, cacheOnly = false) => {
-      if (!sessionId) return
+    // The image floor follows the caller session across accounts, scoped to its key.
+    // Returns the body to send: the image floor and break anchor may rewrite it.
+    const imageKey = callerSession ? `${req.apiKeyRecord?.id || req.apiKeyKind || ''}:${callerSession}` : null
+    const noteCachePrefix = (selected, sessionId, body) => {
+      if (!sessionId) return body
       const key = `${selected.accountId}:${sessionId}`
-      const prefix = trackCachePrefix(key, body, Date.now(), { cacheOnly })
+      const { body: prepared, ...prefix } = prepareCachePrefix(key, body, Date.now(), { imageKey }) || { body }
       logBag.cache_prefix = prefix
       logBag.cache_prefix_key = key
-      if (!prefix?.break) return
+      if (prefix.image_floor_moved) {
+        console.warn(
+          `[cache-prefix] request ${logCtx.request_id} turn ${prefix.turn} image floor messages[${prefix.image_floor}]`,
+        )
+      }
+      if (!prefix.break) return prepared
       const where = formatCacheBreak(prefix)
-      console.warn(`[cache-prefix] request ${logCtx.request_id} turn ${prefix.turn} broke at ${where}`)
+      const anchor = prefix.anchor == null ? '' : `; anchored messages[${prefix.anchor}]`
+      const checkpoint = prefix.checkpoint == null ? '' : `; checkpoint messages[${prefix.checkpoint}]`
+      console.warn(
+        `[cache-prefix] request ${logCtx.request_id} turn ${prefix.turn} broke at ${where}${anchor}${checkpoint}`,
+      )
+      return prepared
     }
     // Keep the envelope separately; only the CLI send boundary owns final headers.
     // Clear each attempt so a failed retry cannot retain the previous hop's snapshot.
@@ -1450,6 +1463,7 @@ export function createHandleProtocol(deps) {
             }
             logBag.official_cc_inference = 'cli-hop'
             logBag.provider = 'local_cli'
+            hopBody = noteCachePrefix(selected, attemptSessionId, hopBody)
             logBag.outbound_summary = summarizeBody(hopBody)
             logBag.cache_continuity = describeCacheContinuity({
               inbound,
@@ -1461,12 +1475,6 @@ export function createHandleProtocol(deps) {
               accountId: selected.accountId,
               requestId: logCtx.request_id,
             })
-            noteCachePrefix(
-              selected,
-              attemptSessionId,
-              hopBody,
-              !requestContext && toolResultImageTailRequested(req.headers),
-            )
             logBag.outbound_session_id = sessionIdForLog(sessionIdFromOutboundBody(hopBody) || attemptSessionId)
             return { body: hopBody, meta: { toolNames: {}, sessionId: attemptSessionId, cliHop: true, requestContext } }
           }
@@ -1529,10 +1537,11 @@ export function createHandleProtocol(deps) {
             authScheme: isApiKeyMode(credMode) ? 'apikey' : 'oauth',
             want1m,
           })
-          logBag.outbound_summary = summarizeBody(prepared.body)
+          const outbound = noteCachePrefix(selected, attemptSessionId, prepared.body)
+          logBag.outbound_summary = summarizeBody(outbound)
           logBag.cache_continuity = describeCacheContinuity({
             inbound,
-            outbound: prepared.body,
+            outbound,
             layer: 'node_object',
             ttl: cacheTtl,
             sessionId: attemptSessionId,
@@ -1540,9 +1549,8 @@ export function createHandleProtocol(deps) {
             accountId: selected.accountId,
             requestId: logCtx.request_id,
           })
-          noteCachePrefix(selected, attemptSessionId, prepared.body)
-          logBag.outbound_session_id = sessionIdForLog(sessionIdFromOutboundBody(prepared.body) || attemptSessionId)
-          return { body: prepared.body, meta: { toolNames: prepared.toolNames, sessionId: attemptSessionId } }
+          logBag.outbound_session_id = sessionIdForLog(sessionIdFromOutboundBody(outbound) || attemptSessionId)
+          return { body: outbound, meta: { toolNames: prepared.toolNames, sessionId: attemptSessionId } }
         },
         callAttempt: async ({ candidate, body, attemptMeta, deliveryMode: attemptDelivery, signal, onCommit }) => {
           if (!clientStream) {

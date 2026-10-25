@@ -98,6 +98,78 @@ function PresetBar({
     </div>
   )
 }
+function ModelEnvExtra({
+  compat,
+  onChange,
+}: {
+  compat: Compat
+  onChange: (next: Compat) => void
+}) {
+  const stored =
+    compat.model_env_extra &&
+    typeof compat.model_env_extra === 'object' &&
+    !Array.isArray(compat.model_env_extra)
+      ? (compat.model_env_extra as Record<string, string>)
+      : {}
+  const rows = Object.entries(stored)
+  const [model, setModel] = useState('')
+  const [text, setText] = useState('')
+  const save = (next: Record<string, string>) =>
+    onChange({ ...compat, model_env_extra: next })
+  return (
+    <Card className='gap-3 px-4 py-3'>
+      <div className='space-y-1'>
+        <p className='text-sm font-medium'>按模型附加</p>
+        <p className='text-xs leading-5 text-muted-foreground'>
+          模板里的 {'{{model_sentence}}'} 取当前模型这一句，追加在 Environment
+          之后。没填的模型不追加。
+        </p>
+      </div>
+      {rows.map(([id, value]) => (
+        <label key={id} className='block space-y-1'>
+          <span className='font-mono text-xs'>{id}</span>
+          <textarea
+            value={value}
+            rows={2}
+            maxLength={4000}
+            className='w-full rounded-md border bg-background px-2 py-1.5 text-sm'
+            onChange={(event) => save({ ...stored, [id]: event.target.value })}
+          />
+        </label>
+      ))}
+      <div className='flex gap-2'>
+        <input
+          value={model}
+          placeholder='claude-sonnet-5-5'
+          className='h-8 min-w-0 flex-1 rounded-md border bg-background px-2 font-mono text-xs'
+          onChange={(event) => setModel(event.target.value.trim())}
+        />
+        <Button
+          type='button'
+          size='sm'
+          variant='outline'
+          className='cursor-pointer'
+          disabled={!/^[a-z0-9][a-z0-9._-]{0,127}$/i.test(model)}
+          onClick={() => {
+            save({ ...stored, [model.toLowerCase()]: text })
+            setModel('')
+            setText('')
+          }}
+        >
+          添加
+        </Button>
+      </div>
+      <textarea
+        value={text}
+        rows={2}
+        maxLength={4000}
+        placeholder='这个模型要追加的句子'
+        className='w-full rounded-md border bg-background px-2 py-1.5 text-sm'
+        onChange={(event) => setText(event.target.value)}
+      />
+    </Card>
+  )
+}
 
 export function SystemPromptWorkspace({
   compat,
@@ -218,6 +290,7 @@ export function SystemPromptWorkspace({
             env={templateSlotState(blocks, 'env')}
             onChange={onChange}
           />
+          <ModelEnvExtra compat={compat} onChange={onChange} />
 
           <Collapsible open={templateOpen} onOpenChange={setTemplateOpen}>
             <Card className='gap-0 py-0'>

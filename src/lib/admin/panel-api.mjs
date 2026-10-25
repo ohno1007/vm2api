@@ -464,6 +464,41 @@ export function validatePersonaRoutingPatch(body = {}) {
       }
     }
   }
+  const blockMap = compat.persona_block_presets
+  if (blockMap != null) {
+    if (typeof blockMap !== 'object' || Array.isArray(blockMap)) {
+      problems.push('persona_block_presets 必须是对象')
+    } else {
+      for (const [preset, selected] of Object.entries(blockMap)) {
+        if (!PERSONA_PRESETS.includes(preset)) {
+          problems.push(`persona_block_presets.${preset} 不是已知方案`)
+          continue
+        }
+        if (!selected || typeof selected !== 'object' || Array.isArray(selected)) {
+          problems.push(`persona_block_presets.${preset} 必须是对象`)
+          continue
+        }
+        for (const [id, on] of Object.entries(selected)) {
+          if (!id.trim() || id.length > 64) problems.push(`persona_block_presets.${preset}.${id} id 非法`)
+          else if (typeof on !== 'boolean') problems.push(`persona_block_presets.${preset}.${id} 必须是布尔`)
+        }
+      }
+    }
+  }
+  const extras = compat.model_env_extra
+  if (extras != null) {
+    if (typeof extras !== 'object' || Array.isArray(extras)) {
+      problems.push('model_env_extra 必须是对象')
+    } else if (Object.keys(extras).length > 64) {
+      problems.push('model_env_extra 最多 64 个模型')
+    } else {
+      for (const [id, text] of Object.entries(extras)) {
+        if (!/^[a-z0-9][a-z0-9._-]{0,127}$/i.test(id)) problems.push(`model_env_extra.${id} 模型 id 非法`)
+        else if (typeof text !== 'string') problems.push(`model_env_extra.${id} 必须是字符串`)
+        else if (text.length > 4000) problems.push(`model_env_extra.${id} 超过 4000 字符`)
+      }
+    }
+  }
   if (compat.cache_ttl != null && !['5m', '1h'].includes(String(compat.cache_ttl).trim())) {
     problems.push(`cache_ttl 必须是 5m / 1h，收到 ${compat.cache_ttl}`)
   }
