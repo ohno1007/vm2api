@@ -87,6 +87,8 @@ import { resolveWorkspaceMode, isOfficialClaudeClient } from './workspace-mode.m
 import { assembleOfficialPromptBody, officialMessagesBody } from './anthropic-messages.mjs'
 import { prepareOutboundEnvelope, prepareCliHopBody } from './outbound-attempt.mjs'
 import { toolResultImageTailRequested } from './tool-result-image-tail.mjs'
+import { OFFICIAL_303_PRESET, officialPromptShape, profileForPreset } from '../identity/official-profiles.mjs'
+import { renderOfficial303Body } from '../identity/official-303.mjs'
 import { loadVmIdentity, OFFICIAL_CLI_VERSION } from '../identity/vm-identity.mjs'
 import { touchTelemetrySession } from '../vm/worker-telemetry.mjs'
 import {
@@ -110,6 +112,8 @@ import {
 import {
   applyCrsUnofficialPersona,
   detectProxiedOfficialCcFromRoutingFile,
+  billingIndexesFromMessages,
+  ensureBillingAttribution,
   extractFirstUserText,
   isOfficialClaudeCodeTraffic,
   isProxiedOfficialClaudeCode,
@@ -141,6 +145,7 @@ import {
   applyCacheTtlToUsage,
   cacheBreakpointsFromRoutingFile,
   cacheTtlFromRoutingFile,
+  cacheTtlFromRouting,
   validateCacheBreakpoints,
 } from './cache-ttl.mjs'
 import { confirmCachePrefix, describeCacheContinuity, formatCacheBreak, trackCachePrefix } from './cache-prefix.mjs'
@@ -437,6 +442,7 @@ export function createHandleProtocol(deps) {
     routing = {},
     noGoFallback = false,
     onEnvelope = null,
+    onOutboundHeaders = null,
   }) {
     const assembler = createClaudeMessageAssembler()
     const workerResult = await dispatchStreamInference({
@@ -457,6 +463,7 @@ export function createHandleProtocol(deps) {
       noGoFallback,
       ensureCredential: (exec) => ensureWorkerCredential(exec),
       onEnvelope,
+      onOutboundHeaders,
       onEvent: async (line) => {
         if (/response_headers/.test(String(line))) return
         applyClaudeSSELineToMessage(restoreToolNamesInSSELine(line, toolNames), assembler)
@@ -484,6 +491,8 @@ export function createHandleProtocol(deps) {
       upstream_status: null,
       outbound_body: null,
       outbound_headers: null,
+      outbound_headers_source: 'unavailable',
+      worker_envelope_headers: null,
       outbound_summary: null,
       cache_continuity: null,
       vm_id: null,
@@ -759,7 +768,38 @@ export function createHandleProtocol(deps) {
         })
       if (protocol === 'anthropic.messages') {
         const codex = normalizeCodexRouting(routing.codex)
-        return managedCodex(req, res, logBag, () => handleCodexProtocol({
+        return managedCodex(req, res, logBag, () =>
+          handleCodexProtocol({
+            req,
+            res,
+            protocol,
+            ctx,
+            inbound,
+            logBag,
+            stats,
+            json,
+            writeSSEHeaders,
+            routing: {
+              ...routing,
+              codex: {
+                ...codex,
+                protocols: {
+                  ...codex.protocols,
+                  'anthropic.messages': { mode: 'convert', enabled: true },
+                },
+                convert: { ...codex.convert, anthropic_to_codex: true },
+              },
+            },
+            projectRoot: cfg.paths.project,
+            captureOutbound: logCtx.capture_outbound === true,
+            accountGate,
+            ops: deps.codexOps || {},
+            ...codexSticky,
+          }),
+        )
+      }
+      return managedCodex(req, res, logBag, () =>
+        handleCodexProtocol({
           req,
           res,
           protocol,
@@ -769,41 +809,14 @@ export function createHandleProtocol(deps) {
           stats,
           json,
           writeSSEHeaders,
-          routing: {
-            ...routing,
-            codex: {
-              ...codex,
-              protocols: {
-                ...codex.protocols,
-                'anthropic.messages': { mode: 'convert', enabled: true },
-              },
-              convert: { ...codex.convert, anthropic_to_codex: true },
-            },
-          },
+          routing,
           projectRoot: cfg.paths.project,
           captureOutbound: logCtx.capture_outbound === true,
           accountGate,
           ops: deps.codexOps || {},
           ...codexSticky,
-        }))
-      }
-      return managedCodex(req, res, logBag, () => handleCodexProtocol({
-        req,
-        res,
-        protocol,
-        ctx,
-        inbound,
-        logBag,
-        stats,
-        json,
-        writeSSEHeaders,
-        routing,
-        projectRoot: cfg.paths.project,
-        captureOutbound: logCtx.capture_outbound === true,
-        accountGate,
-        ops: deps.codexOps || {},
-        ...codexSticky,
-      }))
+        }),
+      )
     }
     if (protocol === 'openai.responses') {
       stats.errors++
@@ -1224,12 +1237,18 @@ export function createHandleProtocol(deps) {
       const where = formatCacheBreak(prefix)
       console.warn(`[cache-prefix] request ${logCtx.request_id} turn ${prefix.turn} broke at ${where}`)
     }
-    // 出站日志记录的是传输层最终 POST 给槽位 worker 的 envelope（billing、betas、cch
-    // 都已补齐），不是 applyAttempt 里的中间对象。每次真正发出都会覆盖，所以日志里
-    // 留下的是本请求最后一次发出的内容；从未发出则保持 null。
+    // Keep the envelope separately; only the CLI send boundary owns final headers.
+    // Clear each attempt so a failed retry cannot retain the previous hop's snapshot.
     const noteOutboundEnvelope = (envelope) => {
       if (logCtx.capture_outbound) logBag.outbound_body = envelope?.body ?? null
-      logBag.outbound_headers = envelope?.headers ? redactHeaders(envelope.headers) : null
+      logBag.worker_envelope_headers = envelope?.headers ? redactHeaders(envelope.headers) : null
+      logBag.outbound_headers = null
+      logBag.outbound_headers_source = 'unavailable'
+    }
+    const noteOutboundHeaders = (headers) => {
+      if (!logCtx.capture_outbound) return
+      logBag.outbound_headers = redactHeaders(headers)
+      logBag.outbound_headers_source = 'cli_final'
     }
     let result
     try {
@@ -1328,8 +1347,12 @@ export function createHandleProtocol(deps) {
           )
           let hopBody = body
           if (cliHop) {
-            // The selected preset supplies text; the shared schema owns placement and TTL.
-            const panelRewrite = !requestContext && !officialPassthrough
+            // Custom presets keep their configured text; official_303 uses the upstream assembler.
+            const panelRewrite = !requestContext && !officialPassthrough && resolvedPersona !== OFFICIAL_303_PRESET
+            const outboundProfile = profileForPreset(resolvedPersona)
+            // official_303: lean models get the 2.1.303 assembler; full-prompt models keep this path at 2.1.303.
+            const outboundShape =
+              !requestContext && resolvedPersona === OFFICIAL_303_PRESET ? officialPromptShape(body?.model) : null
             hopBody = prepareCliHopBody(repaired ? body : hopBody, {
               stream: upstreamStream,
               repaired,
@@ -1341,7 +1364,30 @@ export function createHandleProtocol(deps) {
               autoCompactWindow: ctx.autoCompactWindow,
               toolResultImageTail: toolResultImageTailRequested(req.headers),
               routing: routingNow,
+              outboundShape,
             })
+            if (outboundShape === 'lean') {
+              hopBody = renderOfficial303Body(hopBody, {
+                callerSystem: personaIn?.system,
+                officialCaller: officialTraffic,
+                identity,
+                compat: routingNow?.compatibility || {},
+                cacheTtl: cacheTtlFromRouting(routingNow),
+                firstUserText,
+                sessionId: attemptSessionId,
+                oneM: hasClaudeCode1mSuffix(inbound?.model),
+              })
+              // Top-level body field: kernel keeps unknown fields; cli-node reads and deletes it.
+              hopBody.kin_outbound_shape = 'lean'
+            }
+            if (!requestContext) {
+              hopBody = ensureBillingAttribution(hopBody, {
+                firstUserText,
+                sessionId: attemptSessionId,
+                cliVersion: outboundProfile.cliVersion,
+                indexes: billingIndexesFromMessages(hopBody.messages),
+              })
+            }
             hopBody = await materializeRemoteImageSources(hopBody)
             if (panelRewrite) {
               // prepareCliHopBody already stripped billing, identity and
@@ -1369,7 +1415,13 @@ export function createHandleProtocol(deps) {
                 standing: standingUsageFromRoutingFile(routingConfigPath, resolvedPersona),
               })
             }
-            if (!requestContext) {
+            if (!requestContext && !officialPassthrough && resolvedPersona !== OFFICIAL_303_PRESET) {
+              hopBody = ensureBillingAttribution(hopBody, {
+                firstUserText,
+                sessionId: attemptSessionId,
+                cliVersion: outboundProfile.cliVersion,
+                indexes: billingIndexesFromMessages(hopBody.messages),
+              })
               hopBody = assembleOfficialPromptBody(hopBody, { ttl: requestedCacheTtl, preserveMessageMarker: true })
               validateCacheBreakpoints(hopBody)
             }
@@ -1393,6 +1445,9 @@ export function createHandleProtocol(deps) {
             if (!panelRewrite) personaHideTokens = 0
             logBag.inference_engine = resolveInferenceEngine(selected.vm, routingNow)
             logBag.persona_preset = resolveSlotPersonaPreset(selected.vm, routingNow)
+            if (outboundShape) {
+              logBag.outbound_profile = { cli_version: outboundProfile.cliVersion, shape: outboundShape }
+            }
             logBag.official_cc_inference = 'cli-hop'
             logBag.provider = 'local_cli'
             logBag.outbound_summary = summarizeBody(hopBody)
@@ -1508,6 +1563,7 @@ export function createHandleProtocol(deps) {
               routing: getRouting(),
               noGoFallback: !!pinVmId,
               onEnvelope: noteOutboundEnvelope,
+              onOutboundHeaders: noteOutboundHeaders,
             })
           }
           let state
@@ -1555,6 +1611,7 @@ export function createHandleProtocol(deps) {
               noGoFallback: !!pinVmId,
               ensureCredential: (exec) => ensureWorkerCredential(exec),
               onEnvelope: noteOutboundEnvelope,
+              onOutboundHeaders: noteOutboundHeaders,
               onCommit: () => {
                 if (protocol === 'anthropic.messages' && !res.headersSent) writeSSEHeaders(res)
                 onCommit()
@@ -1803,18 +1860,20 @@ export function createHandleProtocol(deps) {
     }
     logBag.model = typeof body?.model === 'string' ? body.model : null
     logBag.inbound_summary = summarizeBody(body)
-    return managedCodex(req, res, logBag, () => handleCodexSearch({
-      req,
-      res,
-      body,
-      logBag,
-      stats,
-      json,
-      routing: getRouting() || {},
-      projectRoot: cfg.paths.project,
-      stickyRouter,
-      ownerScope: ownerScopeFromRequest(req, apiKeyStore?.users),
-    }))
+    return managedCodex(req, res, logBag, () =>
+      handleCodexSearch({
+        req,
+        res,
+        body,
+        logBag,
+        stats,
+        json,
+        routing: getRouting() || {},
+        projectRoot: cfg.paths.project,
+        stickyRouter,
+        ownerScope: ownerScopeFromRequest(req, apiKeyStore?.users),
+      }),
+    )
   }
 
   /** Field names and image count only: Images bodies carry base64 uploads. */
@@ -1913,19 +1972,21 @@ export function createHandleProtocol(deps) {
     }
     logBag.model = typeof body?.model === 'string' ? body.model : null
     logBag.inbound_summary = summarizeImagesBody(body)
-    return managedCodex(req, res, logBag, () => handleCodexImages({
-      req,
-      res,
-      kind,
-      body,
-      logBag,
-      stats,
-      json,
-      routing: getRouting() || {},
-      projectRoot: cfg.paths.project,
-      stickyRouter,
-      ownerScope: ownerScopeFromRequest(req, apiKeyStore?.users),
-    }))
+    return managedCodex(req, res, logBag, () =>
+      handleCodexImages({
+        req,
+        res,
+        kind,
+        body,
+        logBag,
+        stats,
+        json,
+        routing: getRouting() || {},
+        projectRoot: cfg.paths.project,
+        stickyRouter,
+        ownerScope: ownerScopeFromRequest(req, apiKeyStore?.users),
+      }),
+    )
   }
 
   return {

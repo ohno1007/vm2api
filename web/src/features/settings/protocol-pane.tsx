@@ -19,6 +19,7 @@ import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
 import { SettingRow } from '@/components/setting-row'
+import { OutboundReference } from './outbound-reference'
 import {
   cchEnabledFromCompat,
   sessionIdleTtlFromInference,
@@ -269,6 +270,7 @@ export function ProtocolPane({
           }
         />
       </PaneSection>
+      <OutboundReference />
     </div>
   )
 }

@@ -2,6 +2,57 @@
 
 ## 未发布
 
+## 1.3.226 — 2026-10-24
+
+- 协议 / billing（#698）：调用方自带的 billing 不再改写 `cc_entrypoint`；网关生成或 cli-node 缺失 billing 时的补头仍为 `cc_entrypoint=sdk-cli`，并带上 `cc_turn_origin` 与轮次索引。文档明确 CCH 密封块属于 billing body、非 User-Agent；补充 crs-persona 与面板协议页回归测试。
+- 出站身份对齐 2.1.303：中间 hop 与出站 UA 为 `(external, sdk-cli)`；官方身份预设、`official_303` 别名与「官方完整提示词」模板/首句对齐 2.1.303 样本；透传抓包到的 Claude 身份相关头。
+- 各档位网关生成与 cli-node 兜底 billing 的 `cc_entrypoint` 由 `cli` 改回 `sdk-cli`（与 2.1.303 抓包一致）；出站 billing 字节随之变化，各会话首轮重建一次缓存。
+- 请求日志：`outbound_headers` 改为 cli-node 在最终 fetch 前回传的脱敏请求头；Node → worker 中间头存入 `worker_envelope_headers`。流式与非流式入站均支持；旧 CLI 未回传时显示未获取，旧日志不冒充最终值。
+- payload 钉住 `payload-2026.10.24-cli-303-sdk`，cli-node `cb2f8fb9`（27784880 字节）。新 cli-node 补齐 `Accept: application/json, text/event-stream` 与 `Accept-Encoding: gzip, br`，CCH 密封后按最终 UTF-8 请求体写 `Content-Length`；修复旧 SDK 把毫秒 timeout 写入 `x-stainless-timeout`（缺省 `600000` → `600` 秒）。
+
+已部署机升级：须同时更新 Node 控制面与 `web/dist`，执行 `npm run fetch:payload` 换上 `payload-2026.10.24-cli-303-sdk` 后 `wrap-cli/sync`，再重启 Node；仅更新 Node 不够。勿对槽位做 sync/recreate 以外的破坏性操作。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
+## 1.3.225 — 2026-10-24
+
+- CI：PR 的 run 先合入 base 分支最新提交再测，Re-run 即对着当前 main（GitHub 的 `refs/pull/<n>/merge` 停在 PR 最后一次 push 时的 base）；`cancel-in-progress` 只对 PR 生效，main 每次 push 都留下结论。新增 `pr-rerun.yml`：main 的 ci 由红转绿时自动重跑最近一次 ci 失败的 open PR（非草稿、无冲突），也可手动触发。
+
+已部署机升级：无运行时变化（仅 CI / 文档），可不升级。
+
+## 1.3.224 — 2026-10-24
+
+- API 直连原生 Anthropic Messages：端点上显式配置的头优先于调用方协议头；`anthropic-beta` 取端点与调用方的并集（未知 beta / safeguards 照常透传）；调用方带来的 `context-1m` 按模型页 1M 策略剥离或放行，端点自己配的不受影响。修复 #667 后 Claude Code 请求使端点 headers 配置失效、并绕过 1M 门禁的问题。
+
+已部署机升级：仅更新 Node 控制面后重启（无 web、无 payload 变化）。不必 `fetch:payload` / `wrap-cli/sync` / recreate 槽。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
+## 1.3.223 — 2026-10-24
+
+- 以 v1.3.221 生产验证产物为基线：`deploy/payload.json` 改指 `payload-2026.10.23-v1.3.221`，并钉住 `kin-worker` / `kin-egress` / `kin-slot-gate`（与线上逐字节一致）。release.yml 与 amd64 镜像不再从源码编译这三个 helper；改 `worker/` 后须重新钉 payload 才会发出。ARM64 镜像与附件不变。
+- CI 合并为单个 job：格式与语法、payload 校验、Node unit、Go vet/test、web；去掉 ARM64 冒烟、真链路 CCH e2e 与 ARM64 主机脚本测试。
+- 删除 1.3.198–1.3.219 的 CLI CCH 历史热修 `scripts/fix-cli-cch.mjs` 及其测试与文档；钉住的 cli-node `944f6457` 已含该修复。
+- 原生 Anthropic Messages 转发调用方协议头（含未知 anthropic-* beta / safeguards）；OpenAI 兼容路由不变。（#667）
+
+已部署机升级：仅更新 Node 控制面后重启（#667 无 web；#696 payload 字节与 1.3.221 相同）。不必 `fetch:payload` / `wrap-cli/sync` / recreate 槽。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
+## 1.3.222 — 2026-10-23
+
+- 保留调用方自带 description+schema 的 web_search 族 function 工具，不再改写成原生服务端搜索；非搜索名工具不受影响。（#694）
+
+已部署机升级：仅更新 Node 控制面与 `web/dist` 后重启；不必 `fetch:payload` / `wrap-cli/sync` / recreate 槽。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
+## 1.3.221 — 2026-10-23
+
+- 新增提示词档「官方 2.1.303（按模型）」`official_303`，手动选择，默认档仍是官方完整提示词。Opus 4.8 / 5 / 5.5、Fable、Mythos 等按 2.1.303 样本组装：system 为 billing、身份句、2.1.303 主提示词；调用方 system 放进第一条 user 的 `<system-reminder>`（官方调用方的 system 不出站，`<total_tokens>` 计数先抹平）；Environment 作为尾部 role=system，只替换 `# Environment` 段；断点为身份句、主提示词、最后一条 user，4 条消息起再加上一条 user（共 3–4 个），TTL 取面板缓存 TTL。Sonnet、Haiku、Opus 4.0–4.7 沿用现有 cli-hop 结构（含 1.3.218 的两个 user 断点），只把版本号换成 2.1.303。
+- 「官方提示词」模板的身份块与「0注入」billing 里的 `prompt_version=<…>` 改为交互 CLI 身份句 `You are Claude Code, Anthropic's official CLI for Claude.`；已保存的自定义模板不变。
+- 网关生成的 billing 与 cli-node 兜底 billing 的 `cc_entrypoint` 固定为 `cli`（原 `sdk-cli`），出站 UA 也锁为 `(external, cli)`；`cc_turn_origin` 不变。所有档位的出站 billing 字节随之变化，各会话首轮重建一次缓存。
+- 选 303 档的槽位 UA、billing `cc_version` 与 CCH 输入为 2.1.303，按 job 热读 kernel.json，不重启槽位；其余四档仍为 2.1.296。
+- 设置 → 协议新增只读「当前出站参照」：按已保存的全局档位列出提示词档、CLI 版本、UA、billing `cc_version` 与 OAuth beta 样例（`GET /api/panel/outbound-profile`）。协议页保存逻辑不变。
+- 新增 `scripts/outbound-shape.mjs`（出站 body 归约成脱敏结构，与 2.1.303 骨架逐项对照；`--wire` 校验 CLI 最终字节）与 `scripts/outbound-replay.mjs`（私有 fixture 经真实 kernel + cli-node 链路回放并判定）。
+- 控制面的出站参照 UA 同步为 `cli`，Node → worker 的 envelope 日志不冒充 CLI 最终请求头。
+- payload 改钉 cli-node `944f6457`（附件 `cli-node-303-944f6457`）：在 1.3.220 的 CCH system-only 修复上加 profile 模式（`official_303`）并锁 `cc_entrypoint=cli`。
+- 仓库自带的 `src/config/routing.json` 默认请求日志模式由 `debug` 改为 `normal`（普通）；Debug 需在 设置 → 日志 手动切换，或用 `KIN_REQUEST_LOG_MODE=debug` / 单请求 `X-Kin-Debug: 1`。已部署机的 `routing.json` 不被覆盖，现有档位保持不变。
+
+已部署机升级：需要同时更新 Node 控制面、`web/dist` 与 cli-node（`npm run fetch:payload` 换上 `944f6457` 后 `wrap-cli/sync`；新 cli-node 已含 1.3.220 的 CCH 修复，不必再跑 `fix-cli-cch`；除 billing 外，不选 303 档时出站结构与 `b5054cb8` 一致）。槽内已是 `944f6457` 的机器 `SLOT_SYNC=skip`。**新 cli-node 上线前不要选 303 档**：旧 cli-node 会把 `kin_outbound_shape` 当调用方字段转发，上游 400。回滚到旧版本后，旧面板不接受 `official_303`，需在 system提示词页重新选档再保存。OMP 工具图片尾置仍未恢复，另行处理。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
 ## 1.3.220 — 2026-10-23
 
 - cch：Node 与原生 CLI 只投影/赋值首个 canonical system billing block，不再误把 messages 或后续 system 中的 billing 示例当作真实计费头改写历史；manifest 钉住已在线验证的 cli-node；提供 `scripts/fix-cli-cch.mjs` 热修 1.3.198–1.3.219 四种历史 CLI payload。（#692）

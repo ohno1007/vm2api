@@ -58,7 +58,7 @@
     }
   },
   "logging": {
-    "mode": "debug",
+    "mode": "normal",
     "retain_days": 7,
     "debug_retain_days": 3,
     "max_mb": 2048

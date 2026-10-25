@@ -18,6 +18,8 @@ import {
   responsesSseToChatChunk,
 } from '../protocol/codex-convert.mjs'
 import { usageFromSseLine } from '../protocol/handle-codex.mjs'
+import { BETA_CONTEXT_1M } from '../protocol/claude-code-betas.mjs'
+import { shouldPassContext1mByPolicy } from '../protocol/model-policy.mjs'
 
 export function resolveInferenceBackend(req) {
   if (req?.apiKeyKind !== 'managed') return 'oauth'
@@ -35,6 +37,66 @@ function joinHeaderMap(headers = {}) {
   for (const [k, v] of Object.entries(headers)) {
     if (v == null || v === '') continue
     out[k] = String(v)
+  }
+  return out
+}
+
+/**
+ * Native Anthropic Messages is a compatibility boundary.  Keep protocol
+ * headers supplied by the caller, including beta names this gateway does not
+ * know yet.  Headers the operator configured on the endpoint win; anthropic-beta
+ * is the union of endpoint and caller tokens so neither opt-in is dropped.
+ */
+function forwardAnthropicProtocolHeaders(headers = {}, protocol = '', protocolKind = '') {
+  if (protocol !== 'anthropic.messages' || protocolKind !== 'anthropic') return {}
+  const out = {}
+  for (const [rawName, rawValue] of Object.entries(headers || {})) {
+    const name = String(rawName || '').toLowerCase()
+    if (
+      !name.startsWith('anthropic-') &&
+      !name.startsWith('x-claude-code-') &&
+      !name.startsWith('x-stainless-') &&
+      name !== 'x-app' &&
+      name !== 'x-client-request-id' &&
+      name !== 'user-agent' &&
+      name !== 'accept-language' &&
+      name !== 'sec-fetch-mode'
+    )
+      continue
+    if (rawValue == null || rawValue === '') continue
+    out[name] = Array.isArray(rawValue) ? rawValue.join(',') : String(rawValue)
+  }
+  return out
+}
+
+function splitBetas(value) {
+  return String(value || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+/** Caller context-1m follows the model-page 1M policy, same as the slot path. */
+function callerBetaTokens(value, model) {
+  const tokens = splitBetas(value)
+  if (!tokens.includes(BETA_CONTEXT_1M) || shouldPassContext1mByPolicy(model)) return tokens
+  return tokens.filter((t) => t !== BETA_CONTEXT_1M)
+}
+
+function mergeCallerProtocolHeaders(base = {}, caller = {}, configured = {}, model = '') {
+  const out = { ...base }
+  const configuredNames = new Set(Object.keys(configured).map((k) => k.toLowerCase()))
+  for (const [name, value] of Object.entries(caller)) {
+    const existing = Object.keys(out).filter((k) => k.toLowerCase() === name)
+    if (name === 'anthropic-beta') {
+      const merged = new Set([...existing.flatMap((k) => splitBetas(out[k])), ...callerBetaTokens(value, model)])
+      for (const k of existing) delete out[k]
+      if (merged.size) out[name] = [...merged].join(',')
+      continue
+    }
+    if (configuredNames.has(name)) continue
+    for (const k of existing) delete out[k]
+    out[name] = value
   }
   return out
 }
@@ -195,14 +257,21 @@ export async function runApiInference({
     body = sealClaudeCodeCch(ensureBillingAttribution(body), {
       enabled: routing?.compatibility?.cch_enabled !== false,
     })
-  const headers = {
-    'content-type': 'application/json',
-    accept: 'text/event-stream',
-    ...upstreamAuthHeaders(protocolKind, picked.key.api_key, {
-      ...extraHeaders,
-      auth_scheme: picked.endpoint.auth_scheme || extraHeaders.auth_scheme || extraHeaders.anthropic_apikey_auth_scheme,
-    }),
-  }
+  const callerProtocolHeaders = forwardAnthropicProtocolHeaders(req?.headers, protocol, protocolKind)
+  const headers = mergeCallerProtocolHeaders(
+    {
+      'content-type': 'application/json',
+      accept: 'text/event-stream',
+      ...upstreamAuthHeaders(protocolKind, picked.key.api_key, {
+        ...extraHeaders,
+        auth_scheme:
+          picked.endpoint.auth_scheme || extraHeaders.auth_scheme || extraHeaders.anthropic_apikey_auth_scheme,
+      }),
+    },
+    callerProtocolHeaders,
+    extraHeaders,
+    canonical.model,
+  )
 
   let upstream
   try {

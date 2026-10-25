@@ -233,6 +233,7 @@ import {
 import { collectSlotIdentity } from '../vm/guest-identity.mjs'
 import { applyOfficialFingerprintToVm, reconcileOfficialFingerprints } from '../identity/official-fingerprint.mjs'
 import { personaPreviewVars } from '../identity/crs-persona.mjs'
+import { buildOutboundProfile } from './outbound-profile.mjs'
 import {
   applyGeneratedFingerprint,
   SLOT_LOCALES,
@@ -5311,6 +5312,10 @@ export function createPanelHandler(ctx) {
       // GET /api/panel/routing
       if (req.method === 'GET' && p === '/api/panel/routing') {
         return json(res, 200, panel.buildRouting({ routingConfig: ctx.routingConfig, stickyRouter }))
+      }
+      // GET /api/panel/outbound-profile — read-only outbound reference for the global preset
+      if (req.method === 'GET' && p === '/api/panel/outbound-profile') {
+        return json(res, 200, panel.ok({ profile: buildOutboundProfile(ctx.routingConfig || {}) }))
       }
       // GET /api/panel/persona/preview-vars?timezone= — real template constants for the system prompt preview
       if (req.method === 'GET' && p === '/api/panel/persona/preview-vars') {

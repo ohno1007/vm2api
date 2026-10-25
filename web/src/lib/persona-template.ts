@@ -22,6 +22,7 @@ export const PERSONA_PRESETS: readonly PersonaPreset[] = [
   'official_full',
   'zero',
   'custom',
+  'official_303',
 ]
 export const DEFAULT_PERSONA_PRESET: PersonaPreset = 'official_full'
 export const OVERLAY_PRESETS: readonly OverlayPreset[] = [
@@ -45,6 +46,7 @@ export const PERSONA_PRESET_OPTIONS: [PersonaPreset, string][] = [
   ['official_full', '官方完整提示词'],
   ['zero', '0注入'],
   ['custom', '自定义'],
+  ['official_303', '官方 2.1.303（按模型）'],
 ]
 export const OVERLAY_PRESET_OPTIONS: [OverlayPreset, string][] = [
   ['off', '关闭'],
@@ -108,6 +110,11 @@ export const PERSONA_TEMPLATE_VARS: [string, string][] = [
   ['cwd', '调用方 cwd（已清洗）'],
   ['cli_version', '官方 CLI 版本号'],
   ['session_id', '出站会话 id'],
+  ['main_prompt_303', '官方 2.1.303 lean 主提示词（记忆目录按槽位填写）'],
+  [
+    'env_303',
+    '官方 2.1.303 Environment 段（槽位身份 + 调用方 cwd / git / shell）',
+  ],
 ]
 
 export const OVERLAY_TEMPLATE_VARS: [string, string][] = [
@@ -139,9 +146,9 @@ export const DEFAULT_PERSONA_TEMPLATES: Record<PersonaPreset, PersonaBlock[]> =
       },
       {
         id: 'identity',
-        note: '官方身份句（Claude Agent SDK）',
+        note: '交互 CLI 身份句',
         type: 'text',
-        text: '{{identity}}',
+        text: '{{identity_cli}}',
       },
       {
         id: 'agent',
@@ -169,45 +176,33 @@ export const DEFAULT_PERSONA_TEMPLATES: Record<PersonaPreset, PersonaBlock[]> =
     official_full: [
       {
         id: 'billing',
-        note: '计费归因头：cc_version / cc_entrypoint / cch / cc_prompt_id，官方必带',
+        note: '2.1.303 计费归因头，不打缓存点',
         type: 'text',
         text: '{{billing}}',
       },
       {
         id: 'identity',
-        note: '交互 CLI 身份句。cli-node 按这句切第 2 段，不能换成 Agent SDK 句',
+        note: '2.1.303 Agent SDK 身份句；实抓首两 system 块无 cache_control',
         type: 'text',
-        text: '{{identity_cli}}',
-      },
-      {
-        id: 'reporting',
-        note: '官方 reporting 整段。必须是独立块，cli-node 才把它从静态段里抬出来',
-        type: 'text',
-        text: '{{reporting}}',
+        text: '{{identity}}',
       },
       {
         id: 'agent_official',
-        note: '静态段。常驻约束在前，官方提示词在后。1h 断点打在这里，排在会变的动态段之前',
+        note: '2.1.303 完整提示词稳定段；动态工具、skills、memory 和日期仍由调用路径提供',
         type: 'text',
         text: '{{agent_standing}}{{agent_official}}',
         cache_control: { type: 'ephemeral', ttl: '1h' },
       },
       {
-        id: 'dynamic_boundary',
-        note: '静态段和动态段的分界。cli-node 丢掉这个标记，只拿它决定 cache scope',
-        type: 'text',
-        text: '{{dynamic_boundary}}',
-      },
-      {
         id: 'env_official',
-        note: '官方 continuation + Environment。2.1.263 起 1h 缓存，无 scope',
+        note: '2.1.303 Environment / continuation；动态段保持按槽位和调用方事实生成',
         type: 'text',
         text: '{{env_official}}',
         cache_control: { type: 'ephemeral', ttl: '1h' },
       },
       {
         id: 'caller_system',
-        note: '调用方 --append-system-prompt 剩余 system，原文追加不清洗',
+        note: '调用方 system 仍追加在完整提示词之后',
         drop_if_empty: true,
         type: 'text',
         text: '{{caller_system}}',
@@ -218,7 +213,7 @@ export const DEFAULT_PERSONA_TEMPLATES: Record<PersonaPreset, PersonaBlock[]> =
         id: 'billing_zero',
         hide: true,
         type: 'text',
-        text: '{{billing_semi}} prompt_version=<{{identity_compact}}>',
+        text: '{{billing_semi}} prompt_version=<{{identity_cli}}>',
       },
       {
         id: 'identity_slot',
@@ -249,6 +244,28 @@ export const DEFAULT_PERSONA_TEMPLATES: Record<PersonaPreset, PersonaBlock[]> =
       },
     ],
     custom: [],
+    official_303: [
+      {
+        id: 'billing',
+        note: '计费归因头，版本 2.1.303，不打缓存点',
+        type: 'text',
+        text: '{{billing}}',
+      },
+      {
+        id: 'identity',
+        note: '交互 CLI 身份句。断点 TTL 取面板缓存 TTL',
+        type: 'text',
+        text: '{{identity_cli}}',
+        cache_control: { type: 'ephemeral' },
+      },
+      {
+        id: 'main',
+        note: '2.1.303 lean 主提示词。reminder / Environment / 消息断点由档案决定，不在模板里',
+        type: 'text',
+        text: '{{agent_standing}}{{main_prompt_303}}',
+        cache_control: { type: 'ephemeral' },
+      },
+    ],
   }
 
 export const DEFAULT_OVERLAY_TEMPLATES: Record<
@@ -310,6 +327,8 @@ export function normalizePersonaPreset(value: unknown): PersonaPreset {
   )
     return 'zero'
   if (raw === 'custom' || raw === 'diy' || raw === 'manual') return 'custom'
+  if (raw === 'official_303' || raw === '303' || raw === 'official-303')
+    return 'official_303'
   return DEFAULT_PERSONA_PRESET
 }
 
@@ -490,7 +509,9 @@ export function personaInjectFromPreset(
   legacy: unknown
 ): string {
   if (preset === 'official') return 'official_prompt'
-  if (preset === 'official_full') return 'official_full'
+  // 2.1.303 档在模板渲染路径上就是官方完整提示词。
+  if (preset === 'official_full' || preset === 'official_303')
+    return 'official_full'
   if (preset === 'zero') return 'zero'
   return String(legacy ?? '').trim() || 'rewrite'
 }

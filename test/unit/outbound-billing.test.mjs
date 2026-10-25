@@ -28,7 +28,7 @@ test('missing billing is added for absent, string and array systems without muta
     const input = { ...base(), ...(system === undefined ? {} : { system }) }
     const before = structuredClone(input)
     const out = ensureBillingAttribution(input, { sessionId })
-    assert.match(billing(out), /cc_version=2\.1\.296\.[0-9a-f]{3};/)
+    assert.match(billing(out), /cc_version=2\.1\.303\.[0-9a-f]{3};/)
     assert.match(billing(out), /cc_entrypoint=sdk-cli;/)
     assert.match(billing(out), /cch=00000;/)
     assert.match(billing(out), new RegExp(`cc_prompt_id=${sessionId};`))

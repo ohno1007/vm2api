@@ -626,6 +626,11 @@ export class RequestLogStore {
         classifier: extra.classifier || null,
         outbound_headers:
           ctx.capture_outbound && extra.outbound_headers != null ? redactHeaders(extra.outbound_headers) : null,
+        outbound_headers_source: ctx.capture_outbound ? extra.outbound_headers_source || null : null,
+        worker_envelope_headers:
+          ctx.capture_outbound && extra.worker_envelope_headers != null
+            ? redactHeaders(extra.worker_envelope_headers)
+            : null,
         outbound_body:
           ctx.capture_outbound && !extra.classifier && extra.outbound_body != null
             ? clampBody(extra.outbound_body, this.maxDebugBodyChars)

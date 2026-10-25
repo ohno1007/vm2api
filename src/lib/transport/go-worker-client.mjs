@@ -656,6 +656,7 @@ export async function streamGoWorker({
   envelope = null,
   cliHop = false,
   onEnvelope = null,
+  onOutboundHeaders = null,
 } = {}) {
   if (isCrsMock()) {
     const { body: outboundBody, headers } = finalizeWorkerPayload({
@@ -841,6 +842,7 @@ export async function streamGoWorker({
     let lastChunkAt = Date.now()
     let sawChunk = false
     let sawMessageStop = false
+    let outboundHeadersFrame = false
     let idleTimer = null
     if (firstByteMs > 0 || idleMs > 0) {
       idleTimer = setInterval(() => {
@@ -859,13 +861,37 @@ export async function streamGoWorker({
       // job_done and its trailers afterward. Keep reading until the worker
       // closes the response so a normal completion is not mistaken for cancel.
       for await (const chunk of response) {
-        sawChunk = true
-        lastChunkAt = Date.now()
         buffer += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)
         let newline
         while ((newline = buffer.indexOf('\n')) >= 0) {
           const line = buffer.slice(0, newline).replace(/\r$/, '')
           buffer = buffer.slice(newline + 1)
+          // CLI diagnostics share the internal stream, never the caller's SSE.
+          if (line.startsWith('event:')) outboundHeadersFrame = line.slice(6).trim() === 'kin_outbound_headers'
+          if (outboundHeadersFrame) {
+            if (line.startsWith('data:')) {
+              const event = parseJson(line.slice(5).trim())
+              if (
+                event?.type === 'kin_outbound_headers' &&
+                event.headers &&
+                typeof event.headers === 'object' &&
+                !Array.isArray(event.headers) &&
+                typeof onOutboundHeaders === 'function'
+              ) {
+                try {
+                  onOutboundHeaders(event.headers)
+                } catch {
+                  console.warn('[worker] outbound header observer failed')
+                }
+              }
+            }
+            if (line === '') outboundHeadersFrame = false
+            continue
+          }
+          if (line) {
+            sawChunk = true
+            lastChunkAt = Date.now()
+          }
           applyClaudeSSELineToMessage(line, assembler)
           if (line.startsWith('data:')) {
             const piece = line.slice(5).trim()
@@ -888,8 +914,9 @@ export async function streamGoWorker({
           }
           await emitLine(line)
         }
+        if (sawChunk && !outboundHeadersFrame && buffer) lastChunkAt = Date.now()
       }
-      if (buffer) {
+      if (buffer && !outboundHeadersFrame) {
         applyClaudeSSELineToMessage(buffer, assembler)
         await emitLine(buffer)
       }

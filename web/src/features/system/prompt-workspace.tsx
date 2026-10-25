@@ -62,7 +62,7 @@ function PresetBar({
     <div
       role='tablist'
       aria-label='system 提示词档位'
-      className='grid grid-cols-2 gap-2 lg:grid-cols-4'
+      className='grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-5'
     >
       {PERSONA_PRESET_OPTIONS.map(([key, label]) => {
         const selected = key === viewing
@@ -188,6 +188,24 @@ export function SystemPromptWorkspace({
               >
                 设为生效
               </Button>
+            </div>
+          ) : null}
+
+          {viewing === 'official_303' ? (
+            <div className='space-y-1.5 rounded-xl border bg-muted/30 px-4 py-3 text-xs leading-5'>
+              <p className='font-medium'>按模型分流，版本 2.1.303</p>
+              <p className='text-muted-foreground'>
+                Opus 4.8 / 5 / 5.5、Fable、Mythos 等：下面三块 system；调用方
+                system 放进第一条 user 的 &lt;system-reminder&gt;（官方调用方的
+                system 不出站）；Environment 作为尾部
+                role=system；最后一条与上一条 user 的末尾非 thinking 块打点（共
+                3–4 个断点），TTL 取协议页的缓存 TTL。
+              </p>
+              <p className='text-muted-foreground'>
+                Sonnet、Haiku、Opus 4.0–4.7：沿用现有 cli-hop
+                结构，只把版本号换成 2.1.303，不使用这里的模板。实际生效值见
+                设置 → 协议 → 当前出站参照。
+              </p>
             </div>
           ) : null}
 

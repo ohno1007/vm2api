@@ -97,7 +97,7 @@ export function stripCliOwnedSystem(system, { preserveCallerEnvironment = false 
 const OFFICIAL_CONTEXT_BUDGET = '<total_tokens>15000000 tokens left</total_tokens>'
 const VOLATILE_CONTEXT_BUDGET = /<total_tokens>\d+ tokens left<\/total_tokens>/g
 
-function stabilizeOfficialContextBudget(text) {
+export function stabilizeOfficialContextBudget(text) {
   const raw = String(text ?? '')
   if (!raw.includes('<total_tokens>')) return raw
   return raw.replace(VOLATILE_CONTEXT_BUDGET, OFFICIAL_CONTEXT_BUDGET)
@@ -299,10 +299,15 @@ export function prepareCliHopBody(
     autoCompactWindow = null,
     toolResultImageTail = false,
     routing = null,
+    outboundShape = null,
   } = {},
 ) {
   if (requestContext?.purpose === 'auto_mode_classifier') return prepareClassifierBody(canonicalBody, { stream })
-  let body = removeCacheControlFields(officialMessagesBody(canonicalBody, { stream, preserveContentShape: true }))
+  // official_303 lean owns its system blocks and cache markers.
+  const lean = outboundShape === 'lean' && !requestContext
+  if (preserveSystem) validateCacheBreakpoints(canonicalBody)
+  let body = officialMessagesBody(canonicalBody, { stream, preserveContentShape: true })
+  if (!lean && !preserveSystem) body = removeCacheControlFields(body)
   const windowTokens = Number(autoCompactWindow)
   if (Number.isInteger(windowTokens) && windowTokens >= 100_000 && windowTokens <= 1_000_000) {
     body.auto_compact_window = windowTokens
@@ -310,20 +315,17 @@ export function prepareCliHopBody(
   delete body.metadata
   // Preserve selected prompt text, never caller-owned attribution or markers.
   if (!preserveSystem) {
-    const leftover = stripCliOwnedSystem(body.system, { preserveCallerEnvironment })
-    if (leftover == null) delete body.system
-    else body.system = leftover
-    body = stabilizeSystemBudget(body)
+    if (!lean) {
+      const leftover = stripCliOwnedSystem(body.system, { preserveCallerEnvironment })
+      if (leftover == null) delete body.system
+      else body.system = leftover
+      body = stabilizeSystemBudget(body)
+    }
     body = stabilizeMessageBudgets(body)
   }
-  if (preserveSystem && Array.isArray(body.system)) {
-    body.system = body.system.filter((block) => !/^\s*x-anthropic-billing-header:/i.test(systemBlockText(block)))
-  } else if (preserveSystem && typeof body.system === 'string') {
-    body.system = body.system.replace(/^\s*x-anthropic-billing-header:[^\r\n]*(?:\r?\n)?/gim, '')
-  }
   // cli-node sends mid-conversation-system. Only models that reject the role need the lift.
-  if (!modelSupportsMidConversationSystem(body.model)) body = liftMidConversationSystemMessages(body)
-  if (!preserveSystem) body = collapseSystemBudgetReminders(body)
+  if (!lean && !modelSupportsMidConversationSystem(body.model)) body = liftMidConversationSystemMessages(body)
+  if (!preserveSystem && !lean) body = collapseSystemBudgetReminders(body)
 
   if (!repaired) {
     normalizeThinkingForModel(body)
@@ -334,13 +336,15 @@ export function prepareCliHopBody(
   body = stripInvalidThinkingBlocks(body, { preserveThinkingBlocks })
   body = applyModelRequestRules(body)
   body = ensureOutputConfigSchema(body)
-  if (Object.prototype.hasOwnProperty.call(body, 'temperature')) delete body.temperature
+  // Lean keeps the caller's explicit official conditional fields; it never adds them.
+  if (!lean && Object.prototype.hasOwnProperty.call(body, 'temperature')) delete body.temperature
   if (Object.prototype.hasOwnProperty.call(body, 'top_p')) delete body.top_p
   if (Object.prototype.hasOwnProperty.call(body, 'top_k')) delete body.top_k
-  if (Object.prototype.hasOwnProperty.call(body, 'context_management')) delete body.context_management
+  if (!lean && Object.prototype.hasOwnProperty.call(body, 'context_management')) delete body.context_management
   if (Object.prototype.hasOwnProperty.call(body, 'cache_control')) delete body.cache_control
   if (!requestContext) {
-    body.messages = officialMessageMarker(body.messages, cacheTtl)
+    if (outboundShape === 'full') body = { ...body, system: officialSystemTemplate(body.system, cacheTtl) }
+    if (!lean) body.messages = officialMessageMarker(body.messages, cacheTtl)
     if (toolResultImageTail) body = moveToolResultImagesToTail(body)
     if (Array.isArray(body.tools)) body = { ...body, tools: stripEagerInputStreaming(body.tools) }
   }

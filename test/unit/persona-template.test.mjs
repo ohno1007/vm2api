@@ -28,6 +28,7 @@ import {
   CRS_COMPACT_IDENTITY,
   CRS_EMPTY_IDENTITY_TEXT,
   CRS_OFFICIAL_AGENT_PROMPT,
+  CRS_OFFICIAL_AGENT_PROMPT_303,
   CRS_OFFICIAL_SYSTEM,
   CRS_OFFICIAL_CLI_SYSTEM,
   CRS_STANDING_CONSTRAINT,
@@ -96,7 +97,7 @@ test('official preset renders billing + identity byte-identical to the legacy bu
   const out = renderPersonaTemplate(DEFAULT_PERSONA_TEMPLATES.official, vars)
   assert.equal(out.length, 2)
   assert.deepEqual(out[0], { type: 'text', text: buildBillingAttributionText('hello', DEFAULT_CLI_VERSION, 's-1') })
-  assert.deepEqual(out[1], { type: 'text', text: CRS_OFFICIAL_SYSTEM })
+  assert.deepEqual(out[1], { type: 'text', text: CRS_OFFICIAL_CLI_SYSTEM })
 })
 
 test('official preset keeps user system in the optional fifth segment', () => {
@@ -112,14 +113,13 @@ test('official preset keeps user system in the optional fifth segment', () => {
 test('official_full preset renders the complete agent prompt separately', () => {
   const vars = personaTemplateVars({ firstUserText: 'hello', sessionId: 's-full', withEnv: true })
   const out = renderPersonaTemplate(DEFAULT_PERSONA_TEMPLATES.official_full, vars)
-  assert.equal(out.length, 5)
-  assert.equal(out[1].text, vars.identity_cli)
-  assert.equal(out[2].text, vars.reporting)
-  assert.equal(out[3].text, vars.agent_official)
+  assert.equal(out.length, 4)
+  assert.equal(out[1].text, vars.identity)
+  assert.equal(out[2].text, CRS_OFFICIAL_AGENT_PROMPT_303)
+  assert.deepEqual(out[2].cache_control, { type: 'ephemeral', ttl: '1h' })
+  assert.equal(typeof out[3].text, 'string')
+  assert.match(out[3].text, /# Environment|# Text output/)
   assert.deepEqual(out[3].cache_control, { type: 'ephemeral', ttl: '1h' })
-  assert.equal(typeof out[4].text, 'string')
-  assert.match(out[4].text, /# Environment|# Text output/)
-  assert.deepEqual(out[4].cache_control, { type: 'ephemeral', ttl: '1h' })
   assert.equal(
     out.some((block) => block.text.includes('__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')),
     false,
@@ -142,12 +142,11 @@ test('agent standing preset flags default off and isolate per preset', () => {
   assert.equal(agentStandingVar({ agent_standing: '', agent_standing_presets: { official: true } }, 'official'), '')
 })
 
-test('zero prompt_version uses the compact Anthropic Claude identity', () => {
+test('zero prompt_version uses the interactive CLI identity', () => {
   const billing = buildZeroBillingText('ping', '2.1.241', 's-2')
-  assert.ok(billing.includes(`prompt_version=<${CRS_COMPACT_IDENTITY}>`))
+  assert.ok(billing.includes(`prompt_version=<${CRS_OFFICIAL_CLI_SYSTEM}>`))
   assert.ok(!billing.includes(CRS_OFFICIAL_SYSTEM))
-  const vars = personaTemplateVars({ firstUserText: 'ping', sessionId: 's-2', env: { timezone: 'UTC' } })
-  assert.equal(vars.identity_compact, CRS_COMPACT_IDENTITY)
+  assert.ok(!billing.includes(CRS_COMPACT_IDENTITY))
 })
 
 test('whole-preset usage mask: persona_hide_presets > persona_hides > template hide flags', () => {
@@ -337,13 +336,13 @@ test('official preset with overlay official parks the mandatory reminder without
 test('official_full routing preset adds the complete agent prompt without changing official', () => {
   withRoutingFile({ persona_preset: 'official_full', overlay_preset: 'off' }, (file) => {
     const out = applyCrsUnofficialPersona({ messages: [{ role: 'user', content: 'hello' }] }, { routingFile: file })
-    assert.equal(out.system.length, 5)
-    assert.equal(out.system[1].text, CRS_OFFICIAL_CLI_SYSTEM)
-    assert.equal(out.system[2].text.startsWith('# Reporting outcomes'), true)
-    assert.equal(out.system[3].text, CRS_OFFICIAL_AGENT_PROMPT)
-    assert.deepEqual(out.system[3].cache_control, { type: 'ephemeral', ttl: '1h' })
-    assert.match(String(out.system[4].text || ''), /# Environment|# Text output/)
+    assert.equal(out.system.length, 4)
+    assert.equal(out.system[1].text, CRS_OFFICIAL_SYSTEM)
+    assert.equal(out.system[2].text, CRS_OFFICIAL_AGENT_PROMPT_303)
+    assert.deepEqual(out.system[2].cache_control, { type: 'ephemeral', ttl: '1h' })
+    assert.match(String(out.system[3].text || ''), /# Environment|# Text output/)
     assert.equal(JSON.stringify(out.system).includes('__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__'), false)
+    assert.equal(out.system[2].text.startsWith('# Reporting outcomes'), false)
   })
 })
 test('cli-hop strip then rewrites official and official_full from the configured template', () => {
@@ -365,7 +364,11 @@ test('cli-hop strip then rewrites official and official_full from the configured
         false,
         `${preset} strip drops billing`,
       )
-      assert.equal(strippedTexts.includes(CRS_OFFICIAL_SYSTEM), false, `${preset} strip drops identity`)
+      assert.equal(
+        strippedTexts.filter((text) => text === CRS_OFFICIAL_CLI_SYSTEM).length,
+        0,
+        `${preset} strip defers identity to the configured template`,
+      )
       const out = applyCrsUnofficialPersona(stripped, {
         routingFile: file,
         mode: preset,
@@ -378,7 +381,7 @@ test('cli-hop strip then rewrites official and official_full from the configured
         preset,
       )
       assert.ok(
-        texts.some((text) => text === (preset === 'official_full' ? CRS_OFFICIAL_CLI_SYSTEM : CRS_OFFICIAL_SYSTEM)),
+        texts.some((text) => text === (preset === 'official_full' ? CRS_OFFICIAL_SYSTEM : CRS_OFFICIAL_CLI_SYSTEM)),
         preset,
       )
       assert.ok(
@@ -387,7 +390,7 @@ test('cli-hop strip then rewrites official and official_full from the configured
       )
       if (preset === 'official_full') {
         assert.ok(
-          texts.some((text) => text.includes(CRS_OFFICIAL_AGENT_PROMPT.slice(0, 40))),
+          texts.some((text) => text.includes(CRS_OFFICIAL_AGENT_PROMPT_303.slice(0, 40))),
           preset,
         )
       }
@@ -408,8 +411,8 @@ test('caller system stays in segment 5 and role=system stays in the transcript',
       },
       { routingFile: file },
     )
-    assert.equal(out.system.length, 6)
-    assert.equal(out.system[5].text, '不要使用你现在的identity跟我对话')
+    assert.equal(out.system.length, 5)
+    assert.equal(out.system[4].text, '不要使用你现在的identity跟我对话')
     assert.equal(out.messages[1].role, 'system')
     assert.equal(out.messages[1].content, 'role-system-note')
   })
@@ -425,8 +428,8 @@ test('hop mode official_full is a template preset, not overwrite', () => {
       { messages: [{ role: 'user', content: 'hello' }] },
       { routingFile: file, mode: 'official_full' },
     )
-    assert.equal(out.system.length, 5)
-    assert.ok(out.system[3].text.endsWith(CRS_OFFICIAL_AGENT_PROMPT))
+    assert.equal(out.system.length, 4)
+    assert.ok(out.system[2].text.endsWith(CRS_OFFICIAL_AGENT_PROMPT_303))
   })
 })
 
@@ -477,7 +480,7 @@ test('no persona preset and no inject uses the full official prompt', () => {
   assert.equal(personaTemplateSettingsFromRouting({ compatibility: {} }).preset, 'official_full')
   withRoutingFile({ overlay_preset: 'off' }, (file) => {
     const out = applyCrsUnofficialPersona({ messages: [{ role: 'user', content: 'hello' }] }, { routingFile: file })
-    assert.equal(out.system[3].text, CRS_OFFICIAL_AGENT_PROMPT)
+    assert.equal(out.system[2].text, CRS_OFFICIAL_AGENT_PROMPT_303)
   })
 })
 
@@ -511,8 +514,8 @@ test('built-in templates omit cache_control.scope; custom explicit scope and cal
     withEnv: true,
   })
   const full = renderPersonaTemplate(DEFAULT_PERSONA_TEMPLATES.official_full, vars)
-  assert.deepEqual(full[3].cache_control, { type: 'ephemeral', ttl: '1h' })
-  assert.equal(full[3].text, vars.agent_official)
+  assert.deepEqual(full[2].cache_control, { type: 'ephemeral', ttl: '1h' })
+  assert.equal(full[2].text, CRS_OFFICIAL_AGENT_PROMPT_303)
   assert.equal(full.at(-1).text, 'KEEP_CALLER_SYSTEM')
 
   const official = renderPersonaTemplate(DEFAULT_PERSONA_TEMPLATES.official, {
@@ -652,7 +655,7 @@ test('template edits are hot-read without a restart', () => {
       },
       { routingFile: file },
     )
-    assert.equal(before.system[1].text, CRS_OFFICIAL_SYSTEM)
+    assert.equal(before.system[1].text, CRS_OFFICIAL_CLI_SYSTEM)
     write({ persona_preset: 'zero', overlay_preset: 'off' })
     const after = applyCrsUnofficialPersona(
       {
@@ -689,7 +692,7 @@ test('agent standing: default off, explicit per-preset on, and custom text repla
   })
   withRoutingFile({ persona_preset: 'official_full', overlay_preset: 'off' }, (file) => {
     const out = applyCrsUnofficialPersona(body(), { routingFile: file })
-    assert.equal(out.system[3].text, CRS_OFFICIAL_AGENT_PROMPT)
+    assert.equal(out.system[2].text, CRS_OFFICIAL_AGENT_PROMPT_303)
   })
   withRoutingFile(
     { persona_preset: 'zero', agent_standing: 'Stay terse.', agent_standing_presets: { zero: true } },

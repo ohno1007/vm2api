@@ -14,7 +14,7 @@ import {
   rustKernelBusy,
 } from './rust-kernel-client.mjs'
 import { maxRequestBytes, streamIdleTimeoutMs } from '../core/config.mjs'
-import { OFFICIAL_CLI_VERSION } from '../identity/vm-identity.mjs'
+import { profileForPreset } from '../identity/official-profiles.mjs'
 import { cacheTtlFromRouting, normalizeCacheTtl } from '../protocol/cache-ttl.mjs'
 import { setVmSchedulable, listVms, getVm } from '../vm/vm-registry.mjs'
 import { isCodexVm } from '../vm/vm-kind.mjs'
@@ -763,7 +763,8 @@ export function writeKernelConfig(
     slots_per_worker: wrapSlotCount(vm, routing || {}),
     persona_preset: resolveSlotPersonaPreset(vm, routing || {}),
     system_layout: resolveCliSystemLayout(vm, routing || {}),
-    cli_version: OFFICIAL_CLI_VERSION,
+    // cli-node hot-reads this per job: UA, billing cc_version and CCH input follow the slot's profile.
+    cli_version: profileForPreset(resolveSlotPersonaPreset(vm, routing || {})).cliVersion,
     default_cache_ttl: defaultCacheTtl,
     cch_enabled: cchEnabled,
     auto_compact_window: autoCompactWindow,

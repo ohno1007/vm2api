@@ -582,6 +582,22 @@ test('debug mode stores full redacted body', () => {
   assert.deepEqual(dbg[0].hop_meta.params.dropped, ['max_tokens'])
 })
 
+test('debug records retain final header provenance and a separate redacted worker envelope', () => {
+  const store = tmpStore('debug')
+  const ctx = store.start({ method: 'POST', headers: {}, socket: {} }, { protocol: 'anthropic.messages' })
+  store.finish(ctx, {
+    status: 200,
+    outbound_headers_source: 'cli_final',
+    outbound_headers: { accept: 'application/json, text/event-stream', authorization: 'Bearer final-secret' },
+    worker_envelope_headers: { 'x-app': 'cli', authorization: 'Bearer envelope-secret' },
+  })
+  const [record] = store.listDebug({ limit: 1 })
+  assert.equal(record.outbound_headers_source, 'cli_final')
+  assert.equal(record.outbound_headers.accept, 'application/json, text/event-stream')
+  assert.equal(record.outbound_headers.authorization, '***REDACTED***')
+  assert.deepEqual(record.worker_envelope_headers, { 'x-app': 'cli', authorization: '***REDACTED***' })
+})
+
 test('outbound bodies are stored only when the operator configured debug, not via caller headers', () => {
   const outbound = { body: { system: 'gateway persona overlay' }, headers: { 'x-app': 'cli' } }
   const record = (store, headers) => {
@@ -591,6 +607,8 @@ test('outbound bodies are stored only when the operator configured debug, not vi
       inbound_body: { model: 'm' },
       outbound_body: outbound.body,
       outbound_headers: outbound.headers,
+      outbound_headers_source: 'cli_final',
+      worker_envelope_headers: outbound.headers,
     })
     return store.getDebug(ctx.request_id)
   }
@@ -599,6 +617,8 @@ test('outbound bodies are stored only when the operator configured debug, not vi
     assert.deepEqual(forced.inbound_body, { model: 'm' })
     assert.equal(forced.outbound_body, null)
     assert.equal(forced.outbound_headers, null)
+    assert.equal(forced.outbound_headers_source, null)
+    assert.equal(forced.worker_envelope_headers, null)
   }
   const operator = record(tmpStore('debug'), {})
   assert.deepEqual(operator.outbound_body, outbound.body)

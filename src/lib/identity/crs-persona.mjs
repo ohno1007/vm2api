@@ -11,7 +11,7 @@
  *             Agent is not injected.
  *             If the caller already sent an agent prompt, that text occupies
  *             the official agent slot. Console label: 官方提示词.
- *   zero    — 与 official_full 同 3 槽：billing（prompt_version 藏短身份）+ 零宽 identity 槽
+ *   zero    — 与 official_full 同 3 槽：billing（prompt_version 藏交互 CLI 身份句）+ 零宽 identity 槽
  *             + 零宽 agent 槽（5m cache）。无 agent 长文、无 Environment。Caller leftover 仍追加。
  *             客户端 usage 遮罩前三块。槽位 persona_preset 会覆盖全局，测 zero 必须槽上也是 zero。
  *   append  — attach the official identity line to the caller system
@@ -53,6 +53,7 @@ import {
   parseInboundEnvFacts,
   sanitizeInboundCwd,
 } from './official-cc-system-2.1.241.mjs'
+import { CRS_OFFICIAL_AGENT_PROMPT_303 } from './official-cc-system-2.1.303-full.mjs'
 import {
   DEFAULT_OVERLAY_PRESET,
   DEFAULT_PERSONA_PRESET,
@@ -68,13 +69,17 @@ import {
   resolveOverlayTemplate,
   resolvePersonaTemplate,
   templateHidesAnything,
+  templatePresetFor,
+  OFFICIAL_303_PRESET,
 } from './persona-template.mjs'
+import { buildOfficial303Environment, renderOfficial303MainPrompt } from './official-profiles.mjs'
 
 export {
   AGENT_EXPANSION_CACHE_CONTROL,
   CRS_AGENT_EXPANSION,
   CRS_OFFICIAL_AGENT_IDENTITY,
   CRS_OFFICIAL_AGENT_PROMPT,
+  CRS_OFFICIAL_AGENT_PROMPT_303,
   CRS_OFFICIAL_CONTINUATION,
   CRS_REPORTING_OUTCOMES,
 }
@@ -307,7 +312,7 @@ function boundedBillingIndex(value, min) {
   return n
 }
 
-/** 2.1.293 appends both indexes, or neither. Entrypoint stays sdk-cli. */
+/** 2.1.293 appends both indexes, or neither. */
 export function billingTurnSuffix(promptIndex, turnIndex) {
   const prompt = boundedBillingIndex(promptIndex, 0)
   const turn = boundedBillingIndex(turnIndex, 1)
@@ -390,6 +395,7 @@ export function ensureBillingAttribution(body, { cliVersion = DEFAULT_CLI_VERSIO
   const complete = (text) =>
     text.replace(lineRe, (line) => {
       found = true
+      if (fields.slice(0, 3).every((key) => new RegExp(`\\b${key}=[^;\\s]+`).test(line))) return line
       let next = line
       for (const key of fields) {
         if (new RegExp(`\\b${key}=[^;\\s]+`).test(next)) continue
@@ -758,7 +764,7 @@ export function configuredTimezone(identity = {}, facts = {}) {
 export function buildZeroBillingText(firstUserText, cliVersion = DEFAULT_CLI_VERSION, sessionId = '') {
   const billing = buildBillingAttributionText(firstUserText, cliVersion, sessionId)
   const header = billing.endsWith(';') ? billing : `${billing};`
-  return `${header} prompt_version=<${CRS_COMPACT_IDENTITY}>`
+  return `${header} prompt_version=<${CRS_OFFICIAL_CLI_SYSTEM}>`
 }
 
 function timezoneEnvBlock(env = {}, sourceTexts = []) {
@@ -803,7 +809,7 @@ export function personaTemplateVars({
     reporting: CRS_REPORTING_OUTCOMES,
     dynamic_boundary: '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__',
     agent_expansion: CRS_AGENT_EXPANSION,
-    agent_official: agentOfficial || CRS_OFFICIAL_AGENT_PROMPT,
+    agent_official: agentOfficial || CRS_OFFICIAL_AGENT_PROMPT_303,
     agent_standing: String(agentStanding || ''),
     env: () => (withEnv ? envTimezoneOnly() : ''),
     caller_agent: String(callerAgent || '').trim(),
@@ -821,6 +827,8 @@ export function personaTemplateVars({
     cwd: String(env?.cwd || '').trim(),
     cli_version: parseCliVersion(cliVersion),
     session_id: String(sessionId || '').trim(),
+    main_prompt_303: () => renderOfficial303MainPrompt({ cwd: env?.cwd }),
+    env_303: () => (withEnv ? buildOfficial303Environment(env, { model: model || env?.modelId }) : ''),
   }
 }
 
@@ -843,6 +851,8 @@ export function personaPreviewVars({ timezone = 'UTC', model = 'claude-sonnet-5'
     timezone: vars.timezone,
     model: vars.model,
     cli_version: vars.cli_version,
+    main_prompt_303: vars.main_prompt_303(),
+    env_303: vars.env_303(),
   }
 }
 
@@ -1187,7 +1197,7 @@ function insertOfficialCallerAgent(system, callerAgent) {
   if (!text || !Array.isArray(system)) return system
   if (system.some((block) => String(block?.text || '').includes(text))) return system
   const block = { type: 'text', text, cache_control: { ...OFFICIAL_CALLER_AGENT_CACHE } }
-  const identityAt = system.findIndex((item) => item?.text === CRS_OFFICIAL_SYSTEM)
+  const identityAt = system.findIndex((item) => isStandaloneOfficialLine(item?.text || ''))
   const at = identityAt >= 0 ? identityAt + 1 : Math.min(system.length, 2)
   return [...system.slice(0, at), block, ...system.slice(at)]
 }
@@ -1378,7 +1388,8 @@ export function personaUsesTemplate(settings) {
     settings.explicit ||
     settings.preset === 'official' ||
     settings.preset === 'official_full' ||
-    settings.preset === 'zero'
+    settings.preset === 'zero' ||
+    settings.preset === OFFICIAL_303_PRESET
   )
 }
 
@@ -1401,6 +1412,7 @@ export function personaPresetFromHopMode(mode) {
     return 'official'
   if (raw === 'zero' || raw === 'zero_inject' || raw === '0inject' || raw === '0-inject') return 'zero'
   if (raw === 'custom' || raw === 'diy' || raw === 'manual') return 'custom'
+  if (raw === OFFICIAL_303_PRESET || raw === '303' || raw === 'official-303') return OFFICIAL_303_PRESET
   return null
 }
 
@@ -1413,7 +1425,7 @@ export function personaPresetFromHopMode(mode) {
 export function personaHidesUsageFromRoutingFile(filePath, mode) {
   const settings = personaTemplateSettingsFromRoutingFile(filePath)
   const hopPreset = mode != null ? personaPresetFromHopMode(mode) : null
-  const preset = hopPreset || settings.preset
+  const preset = templatePresetFor(hopPreset || settings.preset)
   const map = settings.switches.persona_hide_presets
   if (map && typeof map === 'object' && typeof map[preset] === 'boolean') return map[preset]
   if (typeof settings.hides === 'boolean') return settings.hides
@@ -1428,7 +1440,7 @@ export function personaHidesUsageFromRoutingFile(filePath, mode) {
  */
 export function standingUsageFromRoutingFile(filePath, mode) {
   const settings = personaTemplateSettingsFromRoutingFile(filePath)
-  const preset = (mode != null && personaPresetFromHopMode(mode)) || settings.preset
+  const preset = templatePresetFor((mode != null && personaPresetFromHopMode(mode)) || settings.preset)
   return {
     text: agentStandingVar(settings.switches, preset).trim(),
     hide: presetFlagEnabled(settings.switches, 'agent_standing_hide_presets', preset),
@@ -1801,11 +1813,14 @@ export function applyCrsUnofficialPersona(
   const rawCallerAgent = extractCallerAgentPrompt(body.system)
   const fileSettings = personaTemplateSettingsFromRoutingFile(routingFile)
   const hopPreset = mode != null ? personaPresetFromHopMode(mode) : null
-  const templateSettings = hopPreset
+  const chosen = hopPreset
     ? { ...fileSettings, explicit: true, preset: hopPreset }
     : mode == null
       ? fileSettings
       : { ...fileSettings, explicit: false, preset: personaPresetFromLegacyMode(resolved) }
+  // The 2.1.303 assembler only runs on the cli-hop lean path; template rendering here is official_full.
+  const templateSettings =
+    chosen.preset === OFFICIAL_303_PRESET ? { ...chosen, preset: templatePresetFor(chosen.preset) } : chosen
   const preserveEnvironment =
     personaUsesTemplate(templateSettings) &&
     !presetFlagEnabled(templateSettings.switches, 'persona_env_presets', templateSettings.preset)

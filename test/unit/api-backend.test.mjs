@@ -7,7 +7,8 @@ import path from 'node:path'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
 import { StickyRouter } from '../../src/lib/pool/sticky-router.mjs'
 import { FailoverRunner } from '../../src/lib/pool/failover-runner.mjs'
-import { CRS_OFFICIAL_AGENT_PROMPT } from '../../src/lib/identity/crs-persona.mjs'
+import { CRS_OFFICIAL_AGENT_PROMPT_303 } from '../../src/lib/identity/crs-persona.mjs'
+import { OFFICIAL_303_MAIN_PROMPT } from '../../src/lib/identity/official-profiles.mjs'
 import { sessionIdFromOutboundBody } from '../../src/lib/identity/identity-rewrite.mjs'
 import { DEFAULT_AGENT_STANDING } from '../../src/lib/identity/persona-template.mjs'
 import { resolveInferenceBackend, messagesUrl, runApiInference } from '../../src/lib/pool/api-protocol.mjs'
@@ -133,9 +134,9 @@ test('API backend applies the global official_full persona setting', async () =>
     assert.equal(response.status, 200)
     assert.ok(received)
     const outbound = JSON.parse(received.body)
-    assert.equal(outbound.system.length, 5)
+    assert.equal(outbound.system.length, 4)
     assert.ok(
-      outbound.system.some((block) => String(block.text || '').includes(CRS_OFFICIAL_AGENT_PROMPT.slice(0, 80))),
+      outbound.system.some((block) => String(block.text || '').includes(CRS_OFFICIAL_AGENT_PROMPT_303.slice(0, 80))),
     )
   } finally {
     await new Promise((resolve) => kernel.close(resolve))
@@ -143,91 +144,113 @@ test('API backend applies the global official_full persona setting', async () =>
   }
 })
 
-test('OAuth cli-hop applies the resolved Protocol custom persona template', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-slot-persona-'))
-  const routingFile = path.join(root, 'routing.json')
-  const compatibility = {
-    persona_preset: 'custom',
-    persona_inject: 'rewrite',
-    persona_templates: {
-      custom: [{ id: 'custom', type: 'text', text: 'CUSTOM_PERSONA {{timezone}}' }],
-    },
-  }
-  fs.writeFileSync(routingFile, JSON.stringify({ compatibility }))
-  const vm = { id: 'vm-01', claude: { mode: 'oauth' } }
-  const selected = {
-    vmId: vm.id,
-    accountId: 'account-1',
-    vm,
-    exec: {
-      vmId: vm.id,
-      vm,
-      homeDir: path.join(root, 'home'),
-      oauth: { account_uuid: 'account-1' },
-      timezone: 'UTC',
-      locale: 'en_US.UTF-8',
-    },
-  }
-  let prepared = null
-  const response = fakeResponse()
-  const stats = { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 }
-  const handler = createHandleProtocol({
-    json: (_res, status, body) => {
-      response.status = status
-      response.body = body
-      return body
-    },
-    writeSSEHeaders() {},
-    readBody: async () => ({ model: 'claude-haiku-4-5', messages: [{ role: 'user', content: 'hello' }] }),
-    requireAuth: () => true,
-    cfg: {
-      rewrite: { enabled: false },
-      intercept: { rules: [] },
-      distill: { enabled: false },
-      limits: { max_body_bytes: 1024 * 1024, upstream_timeout_ms: 2000, stream_idle_timeout_ms: 2000 },
-      paths: { data: root, project: root },
-    },
-    requestLog: { start: () => ({ request_id: 'slot-persona-test' }), finish() {} },
-    stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
-    accountQuota: {},
-    apiKeyStore: {},
-    apiScheduler: {},
-    apiEndpointStore: {},
-    stats,
-    routingConfigPath: routingFile,
-    routingConfig: { compatibility, failover: {} },
-    failoverRunner: {
-      async run(opts) {
-        prepared = await opts.applyAttempt(opts.canonicalBody, selected)
-        return {
-          ok: false,
-          status: 503,
-          body: { error: { type: 'server_error', code: 'upstream_error', message: 'test stop' } },
-          headers: {},
-        }
+for (const { preset, model, shape } of [
+  { preset: 'custom', model: 'claude-haiku-4-5', shape: null },
+  { preset: 'official_303', model: 'claude-opus-5-5', shape: 'lean' },
+  { preset: 'official_303', model: 'claude-sonnet-4-6', shape: 'full' },
+]) {
+  test(`OAuth cli-hop preserves the ${preset} ${shape || 'custom'} assembly`, async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-slot-persona-'))
+    const routingFile = path.join(root, 'routing.json')
+    const compatibility = {
+      persona_preset: preset,
+      persona_inject: 'rewrite',
+      persona_templates: {
+        custom: [{ id: 'custom', type: 'text', text: 'CUSTOM_PERSONA {{timezone}}' }],
       },
-    },
-    groupsRepo: { rateMultiplier: () => 1 },
-  })
-  const req = {
-    method: 'POST',
-    url: '/v1/messages',
-    headers: { authorization: 'Bearer master', 'user-agent': 'Go-http-client/2.0' },
-    apiKeyKind: 'master',
-    once() {},
-    off() {},
-  }
+    }
+    fs.writeFileSync(routingFile, JSON.stringify({ compatibility }))
+    const vm = { id: 'vm-01', claude: { mode: 'oauth' } }
+    const selected = {
+      vmId: vm.id,
+      accountId: 'account-1',
+      vm,
+      exec: {
+        vmId: vm.id,
+        vm,
+        homeDir: path.join(root, 'home'),
+        oauth: { account_uuid: 'account-1' },
+        timezone: 'UTC',
+        locale: 'en_US.UTF-8',
+      },
+    }
+    let prepared = null
+    const response = fakeResponse()
+    const stats = { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 }
+    const handler = createHandleProtocol({
+      json: (_res, status, body) => {
+        response.status = status
+        response.body = body
+        return body
+      },
+      writeSSEHeaders() {},
+      readBody: async () => ({ model, messages: [{ role: 'user', content: 'hello' }] }),
+      requireAuth: () => true,
+      cfg: {
+        rewrite: { enabled: false },
+        intercept: { rules: [] },
+        distill: { enabled: false },
+        limits: { max_body_bytes: 1024 * 1024, upstream_timeout_ms: 2000, stream_idle_timeout_ms: 2000 },
+        paths: { data: root, project: root },
+      },
+      requestLog: { start: () => ({ request_id: 'slot-persona-test' }), finish() {} },
+      stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
+      accountQuota: {},
+      apiKeyStore: {},
+      apiScheduler: {},
+      apiEndpointStore: {},
+      stats,
+      routingConfigPath: routingFile,
+      routingConfig: { compatibility, failover: {} },
+      failoverRunner: {
+        async run(opts) {
+          prepared = await opts.applyAttempt(opts.canonicalBody, selected)
+          return {
+            ok: false,
+            status: 503,
+            body: { error: { type: 'server_error', code: 'upstream_error', message: 'test stop' } },
+            headers: {},
+          }
+        },
+      },
+      groupsRepo: { rateMultiplier: () => 1 },
+    })
+    const req = {
+      method: 'POST',
+      url: '/v1/messages',
+      headers: { authorization: 'Bearer master', 'user-agent': 'Go-http-client/2.0' },
+      apiKeyKind: 'master',
+      once() {},
+      off() {},
+    }
 
-  try {
-    await handler.handleProtocol(req, response, 'anthropic.messages', '/v1/messages')
-    assert.equal(response.status, 503)
-    assert.ok(prepared?.body)
-    assert.equal(prepared.body.system.length, 2)
-    assert.ok(prepared.body.system.some((block) => String(block.text || '').includes('CUSTOM_PERSONA UTC')))
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true })
-  }
-})
+    try {
+      await handler.handleProtocol(req, response, 'anthropic.messages', '/v1/messages')
+      assert.equal(response.status, 503)
+      assert.ok(prepared?.body)
+      const system = prepared.body.system
+      assert.match(system[0].text, /^x-anthropic-billing-header:/)
+      if (!shape) {
+        assert.equal(system.length, 2)
+        assert.ok(system.some((block) => String(block.text || '').includes('CUSTOM_PERSONA UTC')))
+      } else {
+        assert.equal(prepared.body.kin_outbound_shape, shape === 'lean' ? 'lean' : undefined)
+        assert.match(system[0].text, /cc_version=2\.1\.303\./)
+        assert.equal(system[1].text, "You are Claude Code, Anthropic's official CLI for Claude.")
+        assert.ok(
+          system.some((block) =>
+            shape === 'full'
+              ? String(block.text || '').includes(CRS_OFFICIAL_AGENT_PROMPT_303.slice(0, 80))
+              : String(block.text || '').includes(OFFICIAL_303_MAIN_PROMPT.slice(0, 80)),
+          ),
+        )
+        assert.ok(!JSON.stringify(system).includes('CUSTOM_PERSONA'))
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+}
 
 test('logs the session id actually sent upstream, not the caller one', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-outbound-session-'))

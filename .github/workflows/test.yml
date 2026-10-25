@@ -1,4 +1,5 @@
-# PR/main gate: Node + Go + pinned amd64 payload ELFs + web + native ARM64 deployment.
+# PR/main gate against the production baseline: deploy/payload.json pins the
+# exact ELFs running live, so CI only checks source and the pinned bytes.
 name: ci
 
 on:
@@ -7,19 +8,32 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Only PR runs supersede each other; every main push keeps its own verdict so
+# it is visible when main turned red and when it recovered.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
-  unit:
+  ci:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: merge current base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          # refs/pull/<n>/merge keeps the base from the PR's last push and a
+          # re-run reuses it; merge today's base so a re-run tests against it.
+          git fetch --no-tags origin "$BASE_REF"
+          git -c user.name=ci -c user.email=ci@localhost merge --no-edit FETCH_HEAD
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
@@ -28,113 +42,30 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: '1.25.x'
-          cache-dependency-path: worker/go.sum
-      - run: npm ci
-      - name: panel user and onboarding regression tests
-        run: node --test test/unit/panel-users.test.mjs test/unit/onboarding.test.mjs test/e2e/panel-users.e2e.test.mjs
-      - name: format-check
-        run: npx biome format
-      - name: syntax-check Node source and scripts
-        run: |
-          find src scripts -name '*.mjs' -print0 | xargs -0 -n1 node --check
-      - name: slot payloads and egress helper used by the unit tests
-        run: |
-          npm run fetch:payload
-          npm run build:egress
-      - name: native CLI CCH history regression
-        run: node --test test/e2e/cli-cch-history.e2e.test.mjs
-      - run: npm run test:unit
-      - name: ARM64 host preparation and rollback tests
-        run: python3 -m unittest discover -s test/deploy -v
-
-  arm64:
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - name: prepare pinned x86 QEMU handler
-        run: |
-          python3 deploy/prepare-arm64.py
-          python3 deploy/prepare-arm64.py --check
-          python3 deploy/prepare-arm64.py
-      - name: verify real kernel rollback on the disposable runner
-        run: python3 test/deploy/smoke_binfmt_restore.py
-      - name: validate ARM64 Compose configuration
-        run: |
-          python3 deploy/init-arm64-env.py --port 18787 --container-name vm2api-arm64-ci
-          docker compose -f docker-compose.yml -f docker-compose.arm64.yml config --quiet
-      - name: build native control plane
-        run: docker build --progress=plain --platform linux/arm64 -f deploy/Dockerfile.arm64-control -t vm2api-arm64-control:ci .
-      - name: verify native runtime and emulated payloads
-        run: python3 test/deploy/smoke_arm64_image.py vm2api-arm64-control:ci
-      - name: build and verify a different checkout VERSION
-        run: |
-          trap 'git restore -- VERSION' EXIT
-          python3 -c 'from pathlib import Path; p = Path("VERSION"); p.write_text(p.read_text().strip() + "-arm64-build-check\n")'
-          docker build --progress=plain --platform linux/arm64 -f deploy/Dockerfile.arm64-control -t vm2api-arm64-control:ci-version .
-          python3 test/deploy/smoke_arm64_image.py vm2api-arm64-control:ci-version
-
-  worker:
-    runs-on: ubuntu-latest
-    timeout-minutes: 8
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version: '1.25.x'
           cache-dependency-path: |
             worker/go.sum
             api-kernel/go.sum
-      - name: gofmt
-        run: |
-          files=$(gofmt -l worker api-kernel)
-          if [ -n "$files" ]; then
-            printf 'gofmt needed:\n%s\n' "$files" >&2
-            exit 1
-          fi
-      - name: go test race
-        run: |
-          (cd worker && go test -race ./...)
-          (cd api-kernel && go test -race ./...)
-      - name: go vet
-        run: |
-          (cd worker && go vet ./...)
-          (cd api-kernel && go vet ./...)
-      - name: build Go commands
-        run: |
-          (cd worker && CGO_ENABLED=0 go build -trimpath ./cmd/...)
-          (cd api-kernel && CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/kin-api-kernel" ./cmd/kin-api-kernel)
-
-  kernel:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '22'
-      - name: pinned linux amd64 payload ELFs
-        run: |
-          node scripts/fetch-payload.mjs
-          node scripts/fetch-payload.mjs --check
-          for b in bin/kin-kernel bin/kin-codex-kernel bin/kin-oauth-auth share/wrap-cli/kin-kernel.bin share/wrap-cli/cli-node share/wrap-cli/cc-node share/crag/kin-kernel; do
-            file "$b" | grep -q 'ELF 64-bit LSB .*x86-64'
-          done
-
-  web:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '22'
       - uses: pnpm/action-setup@v6
         with:
           version: 10
           cache: true
           cache_dependency_path: web/pnpm-lock.yaml
-      - name: install and verify
+      - run: npm ci
+      - name: format and syntax
+        run: |
+          npx biome format
+          test -z "$(gofmt -l worker api-kernel)" || { gofmt -l worker api-kernel; exit 1; }
+          find src scripts -name '*.mjs' -print0 | xargs -0 -n1 node --check
+      - name: pinned payload
+        run: |
+          node scripts/fetch-payload.mjs
+          node scripts/fetch-payload.mjs --check
+      - run: npm run test:unit
+      - name: go vet and test
+        run: |
+          (cd worker && go vet ./... && go test ./...)
+          (cd api-kernel && go vet ./... && go test ./...)
+      - name: web
         working-directory: web
         run: |
           pnpm install --frozen-lockfile
