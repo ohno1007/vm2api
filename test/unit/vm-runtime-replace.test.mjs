@@ -218,6 +218,7 @@ test('writeWorkerFiles uses the desired kin-eg network even if the container is 
 })
 
 test('writeWorkerFiles keeps the control-plane gid when chown succeeds', (t) => {
+  t.mock.method(process, 'getuid', () => 1000)
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-worker-group-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const vm = { id: 'vm-10', proxy: { id: 'px-new', host: '1.2.3.4', port: 1080 } }

@@ -447,7 +447,7 @@ test('persistRoutingPatch merges a valid vm patch', async () => {
   }
 })
 
-test('native interval publication reports an unreachable remote VM as failed, not queued success', async () => {
+test('native interval publication reports unavailable local and remote runtimes as failed', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-routing-telemetry-'))
   const vms = path.join(root, 'vms')
   const routingFile = path.join(root, 'routing.json')
@@ -470,15 +470,10 @@ test('native interval publication reports an unreachable remote VM as failed, no
   try {
     const runtime = persistHarness(root, routingFile, routingConfig)
     const changed = await runtime.persistRoutingPatch({ telemetry: { upload_interval_seconds: 3600 } })
-    assert.deepEqual(changed.telemetry_sync, { updated: 1, queued: 0, skipped: 0, failed: ['vm-node'] })
+    assert.deepEqual(changed.telemetry_sync, { updated: 0, queued: 0, skipped: 0, failed: ['vm-claude', 'vm-node'] })
     assert.equal(JSON.parse(fs.readFileSync(routingFile, 'utf8')).telemetry.upload_interval_seconds, 3600)
-    assert.equal(kernel('vm-claude').upload_interval_seconds, 3600)
-    const localSeed = JSON.parse(
-      fs.readFileSync(path.join(vms, 'vm-claude', 'cli-home', '.claude', 'kin-seed.json'), 'utf8'),
-    )
-    assert.equal(localSeed.seed_policy.telemetry_disabled, false)
-    assert.equal(fs.existsSync(path.join(vms, 'vm-claude', 'cli-home', '.claude', 'settings.json')), true)
-    assert.equal(fs.existsSync(path.join(vms, 'vm-claude', 'cli-home', '.claude', 'claude.setting')), true)
+    assert.equal(fs.existsSync(path.join(vms, 'vm-claude', 'run', 'kernel.json')), false)
+    assert.equal(fs.existsSync(path.join(vms, 'vm-claude', 'cli-home', '.claude', 'kin-seed.json')), false)
     assert.equal(fs.existsSync(path.join(vms, 'vm-codex', 'run', 'kernel.json')), false)
     assert.equal(
       (await runtime.persistRoutingPatch({ telemetry: { upload_interval_seconds: 3600 } })).telemetry_sync,

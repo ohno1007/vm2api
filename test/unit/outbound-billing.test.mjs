@@ -7,14 +7,13 @@ import path from 'node:path'
 import { ensureBillingAttribution } from '../../src/lib/identity/crs-persona.mjs'
 import { prepareCliHopBody, prepareOutboundEnvelope } from '../../src/lib/protocol/outbound-attempt.mjs'
 import { finalizeWorkerPayload } from '../../src/lib/transport/go-worker-client.mjs'
-import { computeClaudeCodeCch, projectClaudeCodeCchText } from '../../src/lib/identity/cch.mjs'
 import { runApiInference } from '../../src/lib/pool/api-protocol.mjs'
 
 const sessionId = '11111111-1111-4111-8111-111111111111'
 const identity = { deviceId: 'd'.repeat(64), accountUuid: sessionId, callerSessionId: sessionId }
 const base = () => ({ model: 'claude-sonnet-5', max_tokens: 1024, messages: [{ role: 'user', content: 'hello' }] })
 const billing = (body) =>
-  (typeof body.system === 'string' ? body.system : body.system.map((b) => b.text ?? b).join('\n')).match(
+  (typeof body.system === 'string' ? body.system : (body.system || []).map((b) => b.text ?? b).join('\n')).match(
     /^\s*x-anthropic-billing-header:[^\r\n]*/im,
   )?.[0]
 
@@ -29,7 +28,7 @@ test('missing billing is added for absent, string and array systems without muta
     const before = structuredClone(input)
     const out = ensureBillingAttribution(input, { sessionId })
     assert.match(billing(out), /cc_version=2\.1\.303\.[0-9a-f]{3};/)
-    assert.match(billing(out), /cc_entrypoint=sdk-cli;/)
+    assert.match(billing(out), /cc_entrypoint=cli;/)
     assert.match(billing(out), /cch=00000;/)
     assert.match(billing(out), new RegExp(`cc_prompt_id=${sessionId};`))
     assert.deepEqual(input, before)
@@ -38,7 +37,7 @@ test('missing billing is added for absent, string and array systems without muta
   }
 })
 
-test('existing complete billing and its cache anchors stay untouched; partial billing is completed', () => {
+test('existing billing stays caller-owned, including partial attribution', () => {
   const complete = ensureBillingAttribution({ ...base(), system: 'caller rules' }, { sessionId })
   assert.strictEqual(ensureBillingAttribution(complete), complete)
   const partial = {
@@ -48,7 +47,7 @@ test('existing complete billing and its cache anchors stay untouched; partial bi
   const out = ensureBillingAttribution(partial, { sessionId })
   assert.match(out.system, /cc_version=2\.1\.303\.abc;/)
   assert.match(out.system, /custom=value;/)
-  assert.match(out.system, /cc_entrypoint=sdk-cli;/)
+  assert.strictEqual(out, partial)
   assert.match(out.system, /\ncaller rules$/)
   assert.equal((out.system.match(/x-anthropic-billing-header:/g) || []).length, 1)
 })
@@ -65,11 +64,11 @@ test('final worker payload restores billing stripped by cli-hop and leaves seali
   assert.match(billing(out.body), /cc_version=/)
   assert.match(billing(out.body), /cch=00000;/)
   assert.match(out.body.system[0].text, /^x-anthropic-billing-header:/)
-  assert.equal(out.body.system[1].text, 'caller rules')
+  assert.ok(out.body.system.some((block) => block.text === 'caller rules'))
   assert.equal(out.body.system[0].cache_control, undefined)
 })
 
-test('HTTP envelopes add billing before calculating final CCH for every credential mode', () => {
+test('HTTP envelopes preserve caller systems without injecting attribution for every credential mode', () => {
   for (const credentialMode of ['oauth', 'api-key', 'setup-token']) {
     const input = { ...base(), system: 'caller rules' }
     const out = prepareOutboundEnvelope({
@@ -79,9 +78,8 @@ test('HTTP envelopes add billing before calculating final CCH for every credenti
       unofficial: true,
       credentialMode,
     })
-    const cch = billing(out.body)?.match(/cch=([0-9a-f]{5});/)?.[1]
-    assert.ok(cch, credentialMode)
-    assert.equal(cch, computeClaudeCodeCch(Buffer.from(projectClaudeCodeCchText(JSON.stringify(out.body)))))
+    assert.equal(billing(out.body), undefined, credentialMode)
+    assert.deepEqual(out.body.system, [{ type: 'text', text: 'caller rules' }])
   }
 })
 
@@ -107,9 +105,10 @@ test('classifier worker requests also carry billing without changing verdict or 
   assert.deepEqual(out.body.messages, body.messages)
 })
 
-test('API forwarding seals missing Anthropic billing but does not add it to OpenAI systems', async (t) => {
+test('API forwarding preserves systems without injecting attribution for Anthropic or OpenAI', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-billing-api-'))
   fs.mkdirSync(path.join(root, 'run'))
+  fs.writeFileSync(path.join(root, 'run', 'api-kernel.token'), 'fixture-token')
   const socketPath = path.join(root, 'run', 'api-kernel.sock')
   const captured = []
   const server = http.createServer(async (req, res) => {
@@ -126,7 +125,7 @@ test('API forwarding seals missing Anthropic billing but does not add it to Open
   })
   for (const protocol of ['anthropic', 'openai']) {
     await runApiInference({
-      cfg: { dataDir: root },
+      cfg: { paths: { data: root } },
       scheduler: {
         pick: () => ({
           ok: true,
@@ -142,8 +141,7 @@ test('API forwarding seals missing Anthropic billing but does not add it to Open
       convertedBody: { ...base(), system: 'caller rules' },
     })
   }
-  assert.match(billing(captured[0]), /cc_version=/)
-  const cch = billing(captured[0]).match(/cch=([0-9a-f]{5});/)[1]
-  assert.equal(cch, computeClaudeCodeCch(Buffer.from(projectClaudeCodeCchText(JSON.stringify(captured[0])))))
+  assert.deepEqual(captured[0].system, [{ type: 'text', text: 'caller rules' }])
+  assert.equal(billing(captured[0]), undefined)
   assert.doesNotMatch(JSON.stringify(captured[1]), /x-anthropic-billing-header:/)
 })

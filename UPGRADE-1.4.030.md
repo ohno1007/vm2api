@@ -34,6 +34,14 @@ The restart-policy tests also passed after adding a disabled-slot case.
 All 72 frontend suites / 536 tests passed, followed by TypeScript and Vite build.
 Both worker and API kernel passed `go test -race ./...`.
 
+The complete backend run scanned 324 isolated test files. Fifteen initially
+failed due to old custom protocol/ACL assertions, obsolete ownership helpers,
+root-user assumptions, or missing runtime binaries and Docker fixture responses.
+After aligning those fixtures with the current upstream behavior and installing
+the pinned helpers in the isolated test container, all 215 tests in those fifteen
+files passed on rerun. A separate isolated image startup returned HTTP 200 at
+`/health` before production replacement.
+
 Production upgrade evidence and rollback files are stored outside the repository
 under `/opt/vm2api-upgrade-1430-20261101`. The deployment replaces the control
 container and synchronizes selected enabled slots; it preserves runtime

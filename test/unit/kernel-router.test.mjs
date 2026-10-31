@@ -826,7 +826,9 @@ test('kernel.json rename keeps the control-plane gid while adopting the slot uid
     const changed = writeKernelConfig(root, vm, { token: 'tok', routing: full })
     assert.equal(changed.changed, true)
     const published = kernelOwned()
-    const controlGid = process.getgid()
+    const controlGid = typeof process.getuid === 'function' && process.getuid() === 0
+      ? owner.gid
+      : typeof process.getgid === 'function' ? process.getgid() : owner.gid
     assert.ok(published.length >= 1)
     assert.ok(
       published.every((call) => call.uid === owner.uid && call.gid === controlGid),

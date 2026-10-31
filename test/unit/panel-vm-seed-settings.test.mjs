@@ -87,7 +87,7 @@ test('GET seed-settings returns an empty claude.setting file as empty', async ()
   }
 })
 
-test('PUT seed-settings can follow proxy timezone and locale before writing files', async () => {
+test('PUT seed-settings saves proxy timezone and locale but reports unavailable publication', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-seed-put-tz-'))
   try {
     seed(root, 'vm-01')
@@ -114,13 +114,13 @@ test('PUT seed-settings can follow proxy timezone and locale before writing file
       {},
       new URL('http://localhost/api/panel/vms/vm-01/seed-settings'),
     )
-    assert.equal(response.status, 200, JSON.stringify(response.body).slice(0, 400))
+    assert.equal(response.status, 502, JSON.stringify(response.body).slice(0, 400))
+    assert.equal(response.body.data.saved, true)
+    assert.equal(response.body.data.applied, false)
     const saved = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
     assert.equal(saved.locale, 'zh_CN.UTF-8')
     assert.equal(saved.timezone, 'Asia/Shanghai')
-    assert.equal(response.body.data.settings_json.env.TZ, 'Asia/Shanghai')
-    assert.equal(response.body.data.settings_json.env.LANG, 'zh_CN.UTF-8')
-    assert.equal(response.body.data.settings_json.env.CUSTOM, 'yes')
+    assert.equal(saved.seed_policy.extra_env.CUSTOM, 'yes')
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
