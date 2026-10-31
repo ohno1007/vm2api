@@ -158,7 +158,7 @@ test('unofficial cli-hop converts openai.chat and messages to the same marked sh
     toClaudeMessages('anthropic.messages', { model: MODEL, max_tokens: 256, messages: turns }).claude,
     { unofficial: true, cacheTtl: '1h' },
   )
-  assert.deepEqual(stampMap(fromChat), ['messages[2].content[0]', 'messages[4].content[0]'])
+  assert.deepEqual(stampMap(fromChat), ['system[0]', 'messages[2].content[0]', 'messages[4].content[0]'])
   assert.deepEqual(stampMap(fromMessages), stampMap(fromChat))
   assert.deepEqual(
     fromChat.messages.map((message) => message.role),
