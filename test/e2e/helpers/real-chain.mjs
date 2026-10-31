@@ -13,6 +13,7 @@ import { createHandleProtocol } from '../../../src/lib/protocol/handle-protocol.
 import { createRespond, readBody } from '../../../src/lib/http/respond.mjs'
 import { rememberRustHealth, clearRustHealthCache } from '../../../src/lib/transport/kernel-router.mjs'
 import { profileForPreset } from '../../../src/lib/identity/official-profiles.mjs'
+import { ccEntrypointFromRouting } from '../../../src/lib/identity/crs-persona.mjs'
 
 const PROTOCOL_BY_PATH = {
   '/v1/messages': 'anthropic.messages',
@@ -76,6 +77,7 @@ export async function startRealChain({
   cacheTtl = '5m',
   routingBase = null,
   timezone = 'America/New_York',
+  upstreamSse = null,
 }) {
   const cleanups = []
   let closed = false
@@ -106,7 +108,7 @@ export async function startRealChain({
         return res.end(json(body.model))
       }
       res.writeHead(200, { 'content-type': 'text/event-stream', 'request-id': 'req_303' })
-      res.end(sse(body.model))
+      res.end(upstreamSse || sse(body.model))
     })
     await new Promise((resolve) => upstream.listen(0, '127.0.0.1', resolve))
     cleanups.push(async () => {
@@ -134,9 +136,12 @@ export async function startRealChain({
       slots_per_worker: 2,
       system_layout: 'identity',
       persona_preset: presetNow,
-      // Same projection as writeKernelConfig.
+      // Same projection as writeKernelConfig: cli-node hot-reads this for UA and billing.
       cli_version: profileForPreset(presetNow).cliVersion,
       default_cache_ttl: ttlNow,
+      cc_entrypoint: ccEntrypointFromRouting(
+        routingBase || { compatibility: { persona_preset: presetNow, cache_ttl: ttlNow } },
+      ),
       cch_enabled: true,
       timezone,
       test_endpoints: true,
@@ -183,7 +188,7 @@ export async function startRealChain({
       kernel.kill('SIGKILL')
       await kernelClosed
     })
-    for (let i = 0; i < 100 && !fs.existsSync(socketPath) && kernel.exitCode == null; i++)
+    for (let i = 0; i < 400 && !fs.existsSync(socketPath) && kernel.exitCode == null; i++)
       await new Promise((resolve) => setTimeout(resolve, 50))
     if (!fs.existsSync(socketPath)) throw new Error(`kernel socket missing\n${log.slice(-1200)}`)
     const health = JSON.parse(await unixRequest(socketPath, token, '/internal/health'))

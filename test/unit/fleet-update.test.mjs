@@ -2,10 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
-import net from 'node:net'
 import path from 'node:path'
-import { runFleetUpdate, fleetStatus, isWorkerProcessUp, restartLocalEgress } from '../../src/lib/vm/fleet-update.mjs'
-import { startEgressProcess, inspectEgressProcess } from '../../src/lib/vm/egress.mjs'
+import { runFleetUpdate, fleetStatus, isWorkerProcessUp, applyNativeTelemetry } from '../../src/lib/vm/fleet-update.mjs'
 
 function writeSlot(root, id, extra = {}) {
   const dir = path.join(root, 'vms')
@@ -83,56 +81,6 @@ test('degraded worker without OAuth still counts as up', () => {
   assert.equal(isWorkerProcessUp({ code: 'worker_unavailable' }), false)
 })
 
-test('fleet telemetry skips db rows whose container is absent on this host', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-fleet-skip-'))
-  writeSlot(root, 'vm-07')
-  const report = await runFleetUpdate(root, {
-    action: 'telemetry',
-    telemetryFn: async () => ({ ok: false, error: 'Error: No such container: kin-07' }),
-  })
-  assert.equal(report.total, 1)
-  assert.equal(report.ok_count, 1)
-  assert.equal(report.skipped_count, 1)
-  assert.equal(report.failed_count, 0)
-  assert.equal(report.items[0].skipped, true)
-  assert.equal(report.items[0].skip_reason, 'container_unavailable')
-  assert.equal(report.items[0].telemetry.skipped, true)
-  fs.rmSync(root, { recursive: true, force: true })
-})
-
-test('fleet telemetry still fails when a present container refresh errors', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-fleet-hard-'))
-  writeSlot(root, 'vm-08')
-  const report = await runFleetUpdate(root, {
-    action: 'telemetry',
-    telemetryFn: async () => ({ ok: false, error: 'docker exec failed: permission denied' }),
-  })
-  assert.equal(report.failed_count, 1)
-  assert.equal(report.ok_count, 0)
-  assert.equal(report.items[0].skipped, undefined)
-  assert.equal(report.items[0].code, 'telemetry_update_failed')
-  fs.rmSync(root, { recursive: true, force: true })
-})
-
-test('fleet telemetry uses injected telemetryFn with options object', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-fleet-tel-'))
-  writeSlot(root, 'vm-01', { node_id: 'node-a' })
-  const calls = []
-  const report = await runFleetUpdate(root, {
-    action: 'telemetry',
-    telemetryFn: async (opts) => {
-      calls.push(opts)
-      return { ok: true, action: 'restarted' }
-    },
-  })
-  assert.equal(report.ok_count, 1)
-  assert.equal(calls.length, 1)
-  assert.equal(calls[0].vm.id, 'vm-01')
-  assert.equal(calls[0].projectRoot, root)
-  assert.equal(calls[0].enabled, calls[0].telemetryEnabled)
-  fs.rmSync(root, { recursive: true, force: true })
-})
-
 test('fleet collect skips reload', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-fleet-c-'))
   writeSlot(root, 'vm-01')
@@ -152,107 +100,69 @@ test('fleet collect skips reload', async () => {
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-test('fleet refresh replaces an egress process whose binary was deleted', {
-  skip: process.platform !== 'linux',
-}, async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-fleet-egress-'))
-  const oldBin = path.join(root, 'kin-egress-old')
-  const newBin = path.join(root, 'kin-egress')
-  const source = process.env.KIN_EGRESS_BIN || path.resolve(import.meta.dirname, '../../bin/kin-egress')
-  fs.copyFileSync(source, oldBin)
-  fs.copyFileSync(source, newBin)
-  fs.chmodSync(oldBin, 0o755)
-  fs.chmodSync(newBin, 0o755)
-  const proxy = { id: 'px-fleet', scheme: 'socks5', host: '192.0.2.1', port: 1080, url: 'socks5://192.0.2.1:1080' }
-  writeSlot(root, 'vm-01', { proxy })
-  const probe = net.createServer()
-  const port = await new Promise((resolve) => probe.listen(0, '127.0.0.1', () => resolve(probe.address().port)))
-  await new Promise((resolve) => probe.close(resolve))
-  const previous = process.env.KIN_EGRESS_BIN
-  process.env.KIN_EGRESS_BIN = newBin
-  const orphan = await startEgressProcess({
-    projectRoot: root,
-    proxyId: proxy.id,
-    proxyUrl: 'socks5h://192.0.2.1:1080',
-    listenHost: '127.0.0.1',
-    tcpPort: port,
-    dnsPort: 0,
-    bin: oldBin,
+test('fleet collection bounds concurrency and visits every slot', { timeout: 2000 }, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-fleet-concurrency-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  for (const id of ['vm-01', 'vm-02', 'vm-03', 'vm-04']) writeSlot(root, id)
+  let release
+  const gate = new Promise((resolve) => {
+    release = resolve
   })
-  assert.equal(orphan.ok, true, orphan.error)
-  fs.unlinkSync(oldBin)
-  fs.writeFileSync(path.join(root, 'data/run/egress/px-fleet/egress.pid'), '999999999\n')
-  const egressOpts = {
-    runDocker: (args) =>
-      args[0] === 'network' && args[1] === 'inspect' ? { ok: true, stdout: '127.0.0.0/8|127.0.0.1' } : { ok: true },
-    runIptables: () => ({ ok: true }),
-    listenHost: '127.0.0.1',
-    ports: { tcp: port, dns: 0 },
-    bin: newBin,
-  }
+  let notifyStarted
+  const started = new Promise((resolve) => {
+    notifyStarted = resolve
+  })
+  const collected = []
+  let active = 0
+  let peak = 0
+  const pending = runFleetUpdate(root, {
+    action: 'collect',
+    concurrency: 2,
+    collectFn: async (_root, vm) => {
+      collected.push(vm.id)
+      active += 1
+      peak = Math.max(peak, active)
+      if (collected.length === 2) notifyStarted()
+      await gate
+      active -= 1
+      return { ok: true, id: vm.id }
+    },
+  })
   try {
-    const report = await runFleetUpdate(root, {
-      action: 'telemetry',
-      telemetryFn: async ({ projectRoot, vm }) => restartLocalEgress(projectRoot, vm, egressOpts),
-      healthFn: async () => ({ ok: true }),
-    })
-    assert.equal(report.failed_count, 0, JSON.stringify(report.items))
-    const current = inspectEgressProcess(root, proxy.id)
-    assert.equal(current.ok, true, JSON.stringify(current))
-    assert.notEqual(current.pid, orphan.pid)
-    assert.equal(fs.readlinkSync(`/proc/${current.pid}/exe`), newBin)
-    assert.equal(fs.existsSync(`/proc/${orphan.pid}`), false)
-    assert.equal(
-      JSON.parse(fs.readFileSync(path.join(root, 'data/run/egress/px-fleet/egress.json'), 'utf8')).listen_tcp,
-      `127.0.0.1:${port}`,
-    )
-    process.kill(current.pid, 'SIGTERM')
+    await started
+    assert.equal(active, 2)
+    assert.equal(collected.length, 2, 'queued slots must wait for a free worker')
   } finally {
-    if (previous === undefined) delete process.env.KIN_EGRESS_BIN
-    else process.env.KIN_EGRESS_BIN = previous
-    fs.rmSync(root, { recursive: true, force: true })
+    release()
   }
+  const report = await pending
+  assert.equal(peak, 2)
+  assert.equal(active, 0)
+  assert.deepEqual(collected.sort(), ['vm-01', 'vm-02', 'vm-03', 'vm-04'])
+  assert.equal(report.total, 4)
+  assert.equal(report.ok_count, 4)
+  assert.equal(report.failed_count, 0)
 })
 
-test('concurrent fleet telemetry on two slots sharing one proxy restarts egress once', {
-  skip: process.platform !== 'linux',
-}, async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-fleet-shared-'))
-  const bin = process.env.KIN_EGRESS_BIN || path.resolve(import.meta.dirname, '../../bin/kin-egress')
-  const proxy = { id: 'px-shared', scheme: 'socks5', host: '192.0.2.1', port: 1080, url: 'socks5://192.0.2.1:1080' }
-  writeSlot(root, 'vm-01', { proxy })
-  writeSlot(root, 'vm-02', { proxy })
-  const probe = net.createServer()
-  const port = await new Promise((resolve) => probe.listen(0, '127.0.0.1', () => resolve(probe.address().port)))
-  await new Promise((resolve) => probe.close(resolve))
-  const egressOpts = {
-    runDocker: (args) =>
-      args[0] === 'network' && args[1] === 'inspect' ? { ok: true, stdout: '127.0.0.0/8|127.0.0.1' } : { ok: true },
-    runIptables: () => ({ ok: true }),
-    listenHost: '127.0.0.1',
-    ports: { tcp: port, dns: 0 },
-    bin,
-  }
-  let restartCalls = 0
+test('native telemetry publication uses the current stored VM kind and reports unsupported without writes', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-fleet-current-kind-'))
   try {
-    const report = await runFleetUpdate(root, {
-      action: 'telemetry',
-      concurrency: 4,
-      telemetryFn: async ({ projectRoot, vm }) => {
-        restartCalls += 1
-        return restartLocalEgress(projectRoot, vm, egressOpts)
-      },
-      healthFn: async () => ({ ok: true }),
+    writeSlot(root, 'vm-01', { family: 'codex', seed_policy: { telemetry_disabled: true } })
+    const file = path.join(root, 'vms', 'vm-01.json')
+    const before = fs.readFileSync(file, 'utf8')
+    const result = await applyNativeTelemetry({
+      projectRoot: root,
+      vm: { id: 'vm-01', family: 'claude', seed_policy: { telemetry_disabled: false } },
     })
-    assert.equal(restartCalls, 2)
-    assert.equal(report.failed_count, 0, JSON.stringify(report.items))
-    const current = inspectEgressProcess(root, proxy.id)
-    assert.equal(current.ok, true, JSON.stringify(current))
-    assert.equal(
-      JSON.parse(fs.readFileSync(path.join(root, 'data/run/egress/px-shared/egress.json'), 'utf8')).listen_tcp,
-      `127.0.0.1:${port}`,
-    )
-    process.kill(current.pid, 'SIGTERM')
+    assert.equal(result.ok, false)
+    assert.equal(result.supported, false)
+    assert.equal(result.state, 'unsupported')
+    assert.equal(result.code, 'telemetry_unsupported')
+    assert.equal(result.wrote, false)
+    assert.equal(result.published, false)
+    assert.equal(result.applied, false)
+    assert.equal(fs.readFileSync(file, 'utf8'), before)
+    assert.equal(fs.existsSync(path.join(root, 'vms', 'vm-01', 'cli-home')), false)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }

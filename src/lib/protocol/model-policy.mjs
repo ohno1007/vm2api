@@ -31,7 +31,8 @@ function isCatalogModelId(id) {
   if (s.endsWith('-') || s.endsWith('.')) return false
   if (/\.md$/i.test(s)) return false
   if (/^(gpt-[a-z0-9.-]+|codex-[a-z0-9.-]+)$/i.test(s)) return s.split(/[-.]/).length >= 2
-  if (!/^claude-(opus|sonnet|haiku|fable|3)[a-z0-9.-]*$/i.test(s)) return false
+  if (!/^claude-(opus|sonnet|haiku|fable|3)[a-z0-9.-]*$/i.test(s) && s !== 'auto') return false
+  if (s === 'auto') return true
   return s.split('-').length >= 3
 }
 
@@ -375,6 +376,21 @@ export function seedDefaultPolicy() {
       on_enabled: 'passthrough',
     },
     aliases: [FABLE_51_LEGACY_ID],
+  })
+
+  add('auto', {
+    display_name: 'Auto',
+    family: 'auto',
+    sort: 1,
+    capabilities: CAP_ADAPTIVE_ONLY,
+    betas: { pass_context_1m: false },
+    params: {
+      max_tokens_default: 128000,
+      max_tokens_cap: 128000,
+      on_adaptive: 'passthrough',
+      on_enabled: 'passthrough',
+    },
+    aliases: [],
   })
 
   return {
@@ -855,8 +871,8 @@ function applyHaiku55Thinking(body) {
 
 /**
  * Opus 5.5 and Sonnet 5.5 reject forced tool choice and legacy thinking.
- * Keep the existing auto + strict compatibility policy; strict constrains
- * arguments, not whether the model calls a tool. Computer migration is Opus-only.
+ * Preserve tool choice and strictness; incompatible caller contracts are
+ * rejected at ingress. Computer migration is Opus-only.
  * The patched CLI forwards caller fields, so this has to happen before the hop.
  */
 export function applyModelRequestRules(body = {}) {
@@ -881,22 +897,6 @@ export function applyModelRequestRules(body = {}) {
       if (tool.type !== OPUS_55_COMPUTER_FROM) return tool
       return { ...tool, type: OPUS_55_COMPUTER_TO }
     })
-  }
-  const choice = body.tool_choice
-  const choiceType =
-    typeof choice === 'string'
-      ? choice.toLowerCase()
-      : choice && typeof choice === 'object'
-        ? String(choice.type || '').toLowerCase()
-        : ''
-  if (choiceType === 'any' || choiceType === 'tool' || choiceType === 'required') {
-    const name = choice && typeof choice === 'object' ? choice.name : ''
-    if (choiceType === 'tool' && name && Array.isArray(body.tools)) {
-      body.tools = body.tools.map((tool) =>
-        tool?.name === name && tool.input_schema ? { ...tool, strict: true } : tool,
-      )
-    }
-    body.tool_choice = { type: 'auto' }
   }
   return body
 }
@@ -968,7 +968,9 @@ export function filterPublicModelIds(workerIds = []) {
     ),
   ]
 
-  if (mode === 'worker_only') return ids
+  if (mode === 'worker_only') {
+    return policy.models.auto?.enabled === false || ids.includes('auto') ? ids : [...ids, 'auto']
+  }
 
   // policy_only and legacy worker_intersect_policy: #/models is the catalog.
   return getPolicyCatalogIds({ enabledOnly: true })
@@ -1052,4 +1054,31 @@ export function applyMaxTokensCap(body = {}) {
   const mt = Number(body.max_tokens)
   if (Number.isFinite(mt) && mt > cap) body.max_tokens = cap
   return body
+}
+
+/** Validate the caller contract before any model or persona rewrite. */
+export function validateToolChoice(body = {}) {
+  const choice = body.tool_choice
+  if (choice == null) return
+  const invalid = (message, code = 'invalid_tool_choice') => {
+    const error = new Error(message)
+    error.status = 400
+    error.body = { type: 'error', error: { type: 'invalid_request_error', code, message } }
+    throw error
+  }
+  if (!choice || typeof choice !== 'object' || !['auto', 'none', 'any', 'tool'].includes(choice.type))
+    invalid('tool_choice.type must be auto, none, any, or tool.')
+  const tools = Array.isArray(body.tools) ? body.tools : []
+  if (choice.type !== 'none' && tools.length === 0) invalid('tool_choice requires a non-empty tools list.')
+  if (choice.type === 'tool' && (!choice.name || !tools.some((tool) => tool?.name === choice.name)))
+    invalid('tool_choice.name must identify a supplied tool.')
+  if (!['any', 'tool'].includes(choice.type)) return
+  const entry = getModelEntry(body.model)
+  if (entry.capabilities?.requires_adaptive === true)
+    invalid(
+      'This model requires adaptive thinking and does not support forced tool_choice. Choose a model that supports disabled thinking.',
+      'tool_choice_incompatible',
+    )
+  if (['enabled', 'adaptive'].includes(body.thinking?.type))
+    invalid('Forced tool_choice cannot be combined with enabled or adaptive thinking.', 'tool_choice_incompatible')
 }

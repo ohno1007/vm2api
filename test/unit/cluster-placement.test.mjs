@@ -17,7 +17,13 @@ import {
   startSlotImageBuild,
   unbindPlacement,
 } from '../../src/lib/cluster/placement.mjs'
-import { remoteIptablesScript, slotContainerBody, slotEgressNames } from '../../src/lib/cluster/remote-slot.mjs'
+import {
+  inspectClusterPayloadChanges,
+  refreshNodeSlotPayload,
+  remoteIptablesScript,
+  slotContainerBody,
+  slotEgressNames,
+} from '../../src/lib/cluster/remote-slot.mjs'
 import {
   ensureRemoteOfficialCredentialLink,
   pullSlotCredentials,
@@ -324,6 +330,7 @@ test('a guest-planted symlink at the credential path is refused, not followed', 
 
 test('node paths keep ~/.claude in the host-owned mount, everything else in place', () => {
   assert.equal(remoteSlotPath('cli-home/.claude/settings.json'), 'claude/settings.json')
+  assert.equal(remoteSlotPath('cli-home/.claude/telemetry/egress.json'), 'claude/telemetry/egress.json')
   assert.equal(remoteSlotPath('run/kernel.json'), 'run/kernel.json')
   assert.equal(remoteSlotPath('machine-id'), 'machine-id')
 })
@@ -345,10 +352,20 @@ test('remote iptables script mirrors applyIptables semantics', () => {
   const script = remoteIptablesScript(plan, { sudo: true })
   const lines = script.split('\n')
   assert.equal(lines[0], 'set -e')
-  assert.match(lines[1], /^sudo -n iptables '-t' 'nat' '-N' 'KEGabc' 2>\/dev\/null \|\| true$/)
   // -C guards exactly the following -A/-I; both halves on one line.
-  assert.match(lines[2], /'-C' 'PREROUTING'.*\|\| sudo -n iptables .*'-A' 'PREROUTING'/)
-  assert.ok(lines.at(-1).includes("'-C' 'FORWARD'") && lines.at(-1).includes("'-I' 'FORWARD' '1'"))
+  const forwardLine = lines.find((l) => l.includes("'-C' 'FORWARD'") && l.includes("'-I' 'FORWARD' '1'"))
+  assert.ok(forwardLine, 'FORWARD DROP is emitted as a guarded -C||-I pair')
+  const natChainLine = lines.find((l) => l.includes("'-N' 'KEGabc'"))
+  assert.ok(natChainLine)
+  assert.match(natChainLine, /^sudo -n iptables '-t' 'nat' '-N' 'KEGabc' 2>\/dev\/null \|\| true$/)
+  assert.ok(
+    lines.indexOf(forwardLine) < lines.indexOf(natChainLine),
+    'FORWARD block is installed before NAT chain setup (same order as iptablesPlan.add)',
+  )
+  assert.match(
+    lines.find((l) => l.includes("'-C' 'PREROUTING'")),
+    /'-C' 'PREROUTING'.*\|\| sudo -n iptables .*'-A' 'PREROUTING'/,
+  )
   assert.ok(script.includes("'!'"), 'negation is passed as its own quoted arg')
   const guards = plan.add.filter((row) => row.includes('-C')).length
   assert.equal(lines.length, 1 + plan.add.length - guards, '-C rows fold into their guarded row')
@@ -380,7 +397,7 @@ function fakeElf(file, fill) {
   buf.set([0x7f, 0x45, 0x4c, 0x46, 2, 1], 0)
   buf.writeUInt16LE(62, 18)
   fs.mkdirSync(path.dirname(file), { recursive: true })
-  fs.writeFileSync(file, buf)
+  fs.writeFileSync(file, buf, { mode: 0o755 })
 }
 
 test('slot image tag follows payload bytes only; a VERSION bump keeps the image', (t) => {
@@ -392,6 +409,7 @@ test('slot image tag follows payload bytes only; a VERSION bump keeps the image'
     'bin/kin-kernel',
     'bin/kin-worker',
     'bin/kin-egress',
+    'bin/kin-oauth-auth',
   ]) {
     fakeElf(path.join(root, f), 1)
   }
@@ -401,6 +419,7 @@ test('slot image tag follows payload bytes only; a VERSION bump keeps the image'
     'KIN_WORKER_BIN',
     'KIN_EGRESS_BIN',
     'KIN_CODEX_KERNEL_BIN',
+    'KIN_OAUTH_AUTH_BIN',
     'KIN_WRAP_CLI_ROOT',
     'KIN_CLUSTER_WORKER_BIN',
     'KIN_CLUSTER_EGRESS_BIN',
@@ -448,6 +467,114 @@ test('slot image tag follows payload bytes only; a VERSION bump keeps the image'
   assert.throws(() => slotImageSpec(root, 'nope-os'), { code: 'invalid_kernel' })
 })
 
+test('cluster payload check skips a container already on the content-hashed image', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-cluster-payload-'))
+  const envKeys = [
+    'KIN_KERNEL_BIN',
+    'KIN_WRAP_CLI_ROOT',
+    'KIN_CODEX_KERNEL_BIN',
+    'KIN_OAUTH_AUTH_BIN',
+    'KIN_CLUSTER_WORKER_BIN',
+    'KIN_CLUSTER_EGRESS_BIN',
+  ]
+  const saved = envKeys.map((key) => [key, process.env[key]])
+  t.after(() => {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  })
+  for (const key of envKeys) delete process.env[key]
+  try {
+    for (const file of [
+      'share/wrap-cli/cli-node',
+      'share/wrap-cli/cc-node',
+      'bin/kin-kernel',
+      'bin/kin-worker',
+      'bin/kin-egress',
+      'bin/kin-oauth-auth',
+      'bin/kin-codex-kernel',
+    ])
+      fakeElf(path.join(root, file), 1)
+    process.env.KIN_CODEX_KERNEL_BIN = path.join(root, 'bin/kin-codex-kernel')
+    process.env.KIN_CLUSTER_WORKER_BIN = path.join(root, 'bin/kin-worker')
+    process.env.KIN_CLUSTER_EGRESS_BIN = path.join(root, 'bin/kin-egress')
+    const vm = { id: 'vm-03', node_id: 'node-a', kernel: 'ubuntu-24.04' }
+    const current = slotImageSpec(root, 'ubuntu-24.04').ref
+    const inspect = async () => ({ Config: { Image: current } })
+    const same = await inspectClusterPayloadChanges(root, [vm], { sessionFor: async () => ({ docker: {} }), inspect })
+    assert.equal(same.changed_count, 0)
+    fakeElf(path.join(root, 'share/wrap-cli/cli-node'), 2)
+    const replacementTime = new Date(Date.now() + 1000)
+    fs.utimesSync(path.join(root, 'share/wrap-cli/cli-node'), replacementTime, replacementTime)
+    const next = await inspectClusterPayloadChanges(root, [vm], { sessionFor: async () => ({ docker: {} }), inspect })
+    assert.equal(next.changed_count, 1)
+    const native = { id: 'vm-mac', node_id: 'node-mac', runtime: { payload_digest: 'old' } }
+    const nativeReport = await inspectClusterPayloadChanges(root, [native], {
+      nativeVm: () => true,
+      nativeDigestFor: () => 'new',
+    })
+    assert.equal(nativeReport.items[0].kernel_changed, true)
+    native.runtime.payload_digest = 'new'
+    const sameNative = await inspectClusterPayloadChanges(root, [native], {
+      nativeVm: () => true,
+      nativeDigestFor: () => 'new',
+    })
+    assert.equal(sameNative.changed_count, 0)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('node payload refresh leaves a running slot already on the current image up', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-cluster-refresh-'))
+  const saved = [
+    'KIN_KERNEL_BIN',
+    'KIN_WRAP_CLI_ROOT',
+    'KIN_CLUSTER_WORKER_BIN',
+    'KIN_CLUSTER_EGRESS_BIN',
+    'KIN_CODEX_KERNEL_BIN',
+    'KIN_OAUTH_AUTH_BIN',
+  ].map((key) => [key, process.env[key]])
+  t.after(() => {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    fs.rmSync(root, { recursive: true, force: true })
+  })
+  for (const [key] of saved) delete process.env[key]
+  for (const file of [
+    'share/wrap-cli/cli-node',
+    'share/wrap-cli/cc-node',
+    'bin/kin-kernel',
+    'bin/kin-worker',
+    'bin/kin-egress',
+    'bin/kin-codex-kernel',
+    'bin/kin-oauth-auth',
+  ])
+    fakeElf(path.join(root, file), 1)
+  process.env.KIN_CLUSTER_WORKER_BIN = path.join(root, 'bin/kin-worker')
+  process.env.KIN_CLUSTER_EGRESS_BIN = path.join(root, 'bin/kin-egress')
+  process.env.KIN_CODEX_KERNEL_BIN = path.join(root, 'bin/kin-codex-kernel')
+  const vm = { id: 'vm-03', node_id: 'node-a', kernel: 'ubuntu-24.04', status: 'running' }
+  const current = slotImageSpec(root, 'ubuntu-24.04').ref
+  const inspected = []
+  const report = await refreshNodeSlotPayload(vm, root, {
+    sessionFor: async () => ({ docker: {} }),
+    inspect: async (_docker, name) => {
+      inspected.push(name)
+      return { State: { Running: true }, Config: { Image: current } }
+    },
+    startFn: async () => assert.fail('a slot on the current image must not be recreated'),
+  })
+  assert.deepEqual(inspected, ['kin-03'])
+  assert.equal(report.ok, true)
+  assert.equal(report.kernel_changed, false)
+  assert.equal(report.restarted, false)
+  assert.deepEqual(report.kernel, { ok: true, skipped: true, reason: 'unchanged' })
+})
+
 test('amd64 node payload stays separate from native ARM control helpers', (t) => {
   const root = tmpDir('kin-arm-cluster-payload-')
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
@@ -458,6 +585,7 @@ test('amd64 node payload stays separate from native ARM control helpers', (t) =>
     'bin/kin-codex-kernel',
     'bin/kin-worker',
     'bin/kin-egress',
+    'bin/kin-oauth-auth',
     'amd64/kin-worker',
     'amd64/kin-egress',
   ]) {
@@ -474,6 +602,7 @@ test('amd64 node payload stays separate from native ARM control helpers', (t) =>
     'KIN_WORKER_BIN',
     'KIN_EGRESS_BIN',
     'KIN_CODEX_KERNEL_BIN',
+    'KIN_OAUTH_AUTH_BIN',
     'KIN_WRAP_CLI_ROOT',
     'KIN_CLUSTER_WORKER_BIN',
     'KIN_CLUSTER_EGRESS_BIN',
@@ -618,10 +747,18 @@ test('startSlotImageBuild returns a job awaitSlotImageBuild can finish', async (
     'bin/kin-worker',
     'bin/kin-egress',
     'bin/kin-codex-kernel',
+    'bin/kin-oauth-auth',
   ]) {
     fakeElf(path.join(root, file), 1)
   }
-  const envKeys = ['KIN_CODEX_KERNEL_BIN', 'KIN_CLUSTER_WORKER_BIN', 'KIN_CLUSTER_EGRESS_BIN']
+  const envKeys = [
+    'KIN_KERNEL_BIN',
+    'KIN_WRAP_CLI_ROOT',
+    'KIN_CODEX_KERNEL_BIN',
+    'KIN_OAUTH_AUTH_BIN',
+    'KIN_CLUSTER_WORKER_BIN',
+    'KIN_CLUSTER_EGRESS_BIN',
+  ]
   const saved = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]))
   const hits = []
   const server = http.createServer((req, res) => {
@@ -640,6 +777,7 @@ test('startSlotImageBuild returns a job awaitSlotImageBuild can finish', async (
     }
     fs.rmSync(root, { recursive: true, force: true })
   })
+  for (const key of envKeys) delete process.env[key]
   process.env.KIN_CODEX_KERNEL_BIN = path.join(root, 'bin/kin-codex-kernel')
   process.env.KIN_CLUSTER_WORKER_BIN = path.join(root, 'bin/kin-worker')
   process.env.KIN_CLUSTER_EGRESS_BIN = path.join(root, 'bin/kin-egress')

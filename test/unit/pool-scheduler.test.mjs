@@ -48,6 +48,23 @@ function project() {
 }
 
 class RuntimeRepo {
+  constructor(accounts = null) {
+    this.accounts = accounts
+  }
+  schedulingSnapshot(ids) {
+    return new Map(
+      ids.map((id) => [
+        id,
+        {
+          state: this.get(id),
+          account: this.accounts?.get(id) ? { status: 'active', schedulable: true, ...this.accounts.get(id) } : null,
+        },
+      ]),
+    )
+  }
+  writeHeartbeat(input) {
+    this.upsert(input)
+  }
   states = new Map()
 
   get(id) {
@@ -97,9 +114,11 @@ class RuntimeRepo {
 }
 
 function scheduler(root, extras = {}) {
+  const runtime = extras.runtimeRepo || new RuntimeRepo()
+  runtime.accounts = extras.accountQuota?.repo || null
   return new PoolScheduler({
     projectRoot: root,
-    runtimeRepo: extras.runtimeRepo || new RuntimeRepo(),
+    runtimeRepo: runtime,
     stickyRouter: extras.stickyRouter || null,
     accountQuota: extras.accountQuota || { canAccept: () => ({ ok: true }) },
     workerHealth: extras.workerHealth || (async () => ({ ok: true, credential: { generation: 1, has_access: true } })),
@@ -136,6 +155,46 @@ test('scheduler keeps a slot whose access is expired but refresh remains', async
   assert.equal(selected.ok, true)
   assert.equal(selected.vmId, 'vm-01')
   selected.release()
+})
+
+test('legacy accounts.schedulable false does not hide a panel-on slot', async (t) => {
+  const root = project()
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const repo = new RuntimeRepo()
+  repo.schedulingSnapshot = (ids) =>
+    new Map(
+      ids.map((id) => [
+        id,
+        {
+          state: repo.get(id),
+          account: { status: 'active', schedulable: false, account_id: id },
+        },
+      ]),
+    )
+  const pool = scheduler(root, { runtimeRepo: repo })
+  const selected = await pool.selectAndReserve({ model: 'claude-test', allowWait: false })
+  assert.equal(selected.ok, true)
+  assert.equal(selected.vmId, 'vm-01')
+  selected.release()
+})
+
+test('inactive account status still excludes the slot', async (t) => {
+  const root = project()
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const repo = new RuntimeRepo()
+  repo.schedulingSnapshot = (ids) =>
+    new Map(
+      ids.map((id) => [
+        id,
+        {
+          state: repo.get(id),
+          account: { status: 'disabled', schedulable: true, account_id: id },
+        },
+      ]),
+    )
+  const pool = scheduler(root, { runtimeRepo: repo })
+  const selected = await pool.selectAndReserve({ model: 'claude-test', allowWait: false })
+  assert.equal(selected.ok, false)
 })
 
 test('scheduler skips excluded account and reserves the next one', async (t) => {
@@ -1375,7 +1434,7 @@ test('syncQuotaSchedule keeps Extra 5h exhausted schedulable and skips the slot'
   pool = new PoolScheduler({
     projectRoot: root,
     accountQuota: q,
-    runtimeRepo: repo,
+    runtimeRepo: Object.assign(repo, { accounts: q.repo }),
     workerHealth: async () => ({ ok: true, credential: { generation: 1, has_access: true } }),
   })
   const vmPath = path.join(root, 'vms', 'vm-01.json')
@@ -1409,7 +1468,7 @@ test('syncQuotaSchedule auto-picks Extra 5h again after the window opens', async
   pool = new PoolScheduler({
     projectRoot: root,
     accountQuota: q,
-    runtimeRepo: new RuntimeRepo(),
+    runtimeRepo: new RuntimeRepo(q.repo),
     workerHealth: async () => ({ ok: true, credential: { generation: 1, has_access: true } }),
   })
   const vmPath = path.join(root, 'vms', 'vm-01.json')
@@ -1457,7 +1516,7 @@ test('syncQuotaSchedule does not turn a manual-off slot back on', async (t) => {
   pool = new PoolScheduler({
     projectRoot: root,
     accountQuota: q,
-    runtimeRepo: new RuntimeRepo(),
+    runtimeRepo: new RuntimeRepo(q.repo),
     workerHealth: async () => ({ ok: true, credential: { generation: 1, has_access: true } }),
   })
   const out = pool.syncQuotaSchedule(JSON.parse(fs.readFileSync(vmPath, 'utf8')))
@@ -1488,7 +1547,7 @@ test('leftover quota 调度关 is restored to restricted without flipping the op
   vm.schedulable = false
   vm.schedule_disabled_reason = 'quota_5h_header'
   fs.writeFileSync(vmPath, JSON.stringify(vm))
-  pool = new PoolScheduler({ projectRoot: root, accountQuota: q, runtimeRepo: new RuntimeRepo() })
+  pool = new PoolScheduler({ projectRoot: root, accountQuota: q, runtimeRepo: new RuntimeRepo(q.repo) })
   const out = pool.syncQuotaSchedule(JSON.parse(fs.readFileSync(vmPath, 'utf8')))
   assert.equal(out.action, 'restore')
   const after = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
@@ -1616,6 +1675,7 @@ test('slot-full kernel with live CLI is waitable, not worker_unhealthy', async (
   const selected = await pool.selectAndReserve({ model: 'claude-test', allowWait: false })
   assert.equal(selected.ok, true)
   assert.equal(selected.waitReason, 'slot_busy')
+  await pool.flushHealthWrites()
   assert.notEqual(repo.get(selected.accountId)?.status, 'worker_unhealthy')
   assert.equal(repo.get(selected.accountId)?.status, 'busy')
   selected.release()
@@ -2513,6 +2573,71 @@ test('rebuild outbound session stays on one VM and changes after failover', asyn
   assert.equal(second.vmId, first.vmId)
   assert.equal(secondSeen[0].sessionId, seen[0].sessionId)
   assert.equal(sticky.resolve(stickyKey).sessionId, seen[0].sessionId)
+})
+
+test('held and restored seats keep their outbound session despite a different family home', async (t) => {
+  const root = project()
+  const sticky = new StickyRouter({ dataDir: path.join(root, 'data'), config: { sticky: { enabled: true } } })
+  t.after(() => {
+    sticky.db.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  })
+  const caller = 'seated-session'
+  const stickyKey = sticky.canonicalSessionKey(caller)
+  const familyKey = sticky.canonicalFamilyKey(caller)
+  const deviceKey = sticky.canonicalDeviceKey('seated-machine')
+  sticky.bind(familyKey, { accountId: 'account-1', vmId: 'vm-01' }, { countHit: false })
+  sticky.bindDeviceAffinity(deviceKey, { accountId: 'account-2', vmId: 'vm-02' })
+  const runtimeRepo = new RuntimeRepo()
+  const makeRunner = () =>
+    new FailoverRunner({ scheduler: scheduler(root, { stickyRouter: sticky, runtimeRepo }), stickyRouter: sticky })
+  let runner = makeRunner()
+  const seen = []
+  const run = (turn) =>
+    runner.run({
+      requestId: `seated-turn-${turn}`,
+      canonicalBody: { model: 'claude-opus-test' },
+      model: 'claude-opus-test',
+      stickyKey,
+      seatKey: `seat:sess:${caller}`,
+      familyKey,
+      familyVmId: sticky.resolve(familyKey).vmId,
+      deviceKey,
+      applyAttempt: applyRebuildAttempt(caller, { seen, epoch: turn }),
+      callAttempt: () => verifiedHop('reply'),
+    })
+
+  const first = await run(1)
+  assert.equal(first.ok, true)
+  assert.equal(first.vmId, 'vm-02')
+  const sessionId = seen[0].sessionId
+  for (const turn of [2, 3]) {
+    const result = await run(turn)
+    assert.equal(result.ok, true)
+    assert.equal(result.vmId, 'vm-02')
+    assert.equal(seen.at(-1).sessionId, sessionId)
+    assert.equal(sticky.resolve(stickyKey).sessionId, sessionId)
+  }
+
+  // A control-process restart restores the seat from the persisted binding.
+  runner = makeRunner()
+  const restored = await run(4)
+  assert.equal(restored.ok, true)
+  assert.equal(restored.vmId, 'vm-02')
+  assert.equal(seen.at(-1).sessionId, sessionId)
+
+  // A real home quota gate must still move the seat and remint its session.
+  runtimeRepo.upsert({ account_id: 'account-2', vm_id: 'vm-02', rate_limit_reset_at: Date.now() + 3_600_000 })
+  const moved = await run(5)
+  assert.equal(moved.ok, true)
+  assert.equal(moved.vmId, 'vm-01')
+  const movedSession = seen.at(-1).sessionId
+  assert.notEqual(movedSession, sessionId)
+  const next = await run(6)
+  assert.equal(next.ok, true)
+  assert.equal(next.vmId, 'vm-01')
+  assert.equal(seen.at(-1).sessionId, movedSession)
+  assert.equal(sticky.resolve(stickyKey).sessionId, movedSession)
 })
 
 test('consecutive turns without an inbound session keep one outbound session', async (t) => {

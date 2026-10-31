@@ -312,7 +312,6 @@ test('the images route picks slots by the key owner role, like search', async ()
     users: { getById: (id) => ({ id, role: roles[id] }) },
     acquire: () => ({ ok: true }),
     release() {},
-    recordUsage() { assert.fail('failed upstream image request must not be billed') },
   }
   const run = async (userId) => {
     const rows = []

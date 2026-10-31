@@ -18,7 +18,7 @@ import {
   vmHasClaudeCredential,
   persistAccountTier,
   isCodexVm,
-  setVmSchedulable,
+  migrateVmSchedule,
 } from '../vm/vm-registry.mjs'
 import { clearRecoverableVmCooldown, markVmRefreshError } from '../oauth/oauth-credentials.mjs'
 import {
@@ -38,12 +38,14 @@ import { makeError, ErrorType, ErrorCode } from '../core/errors.mjs'
 import { filterVmsForPanel } from './resource-owner.mjs'
 import { computeWeeklySplit, publicWeeklySplit, weeklySplitConfig } from '../pool/weekly-split.mjs'
 import { proxyBlockedReason } from '../vm/proxy-policy.mjs'
+import { pickScheduleFields } from '../pool/schedule-state.mjs'
 import { socksProxyFamily, normalizeSocksHost } from '../vm/socks-address.mjs'
 import { accountTierKey, isNearLimit, normalizeTiers, resolveTierPolicy } from '../pool/quota-tiers.mjs'
 import { applyVmQuotaConfig, applyVmQuotaPolicy, vmQuotaOverrideOf, vmQuotaView } from '../pool/vm-quota-override.mjs'
 import { GATE_OPEN, gatePolicyFields, gateZone, quotaGateOf } from '../pool/quota-gate.mjs'
 import { inferClaudeTier } from '../pool/claude-tier.mjs'
 import { listQuotaFromHeaders, isOfficialWindowLimited } from '../pool/quota-window.mjs'
+import { lastClosedWindow } from '../pool/window-history.mjs'
 import { hardBlockOf } from '../pool/rate-limit-service.mjs'
 import { unitCircuit } from '../pool/unit-circuit.mjs'
 import { accountIdOf, normalizePoolRouting } from '../pool/pool-scheduler.mjs'
@@ -76,13 +78,14 @@ import { normalizeHealthProbeConfig } from './health-probe.mjs'
 import { normalizeUsageProbeConfig } from '../oauth/usage-probe-monitor.mjs'
 import { publicNotifyConfig, summarizePoolAvailability } from './notify.mjs'
 import { cacheHitStats } from './cache-metrics.mjs'
-import { estimateWindow, usedRatioOf } from './window-estimate.mjs'
+import { estimateWindow, projectWindowRemaining, usedRatioOf } from './window-estimate.mjs'
 import { shanghaiDayStartIso } from './pricing.mjs'
 import {
   AGENT_STANDING_MAX,
   PRESET_FLAG_FIELDS,
   OVERLAY_PRESETS,
   PERSONA_PRESETS,
+  canonicalPersonaCompat,
   parsePersonaHides,
   validatePersonaTemplate,
 } from '../identity/persona-template.mjs'
@@ -93,7 +96,7 @@ import { effectiveOpenAIPolicy, normalizeOpenAIQuotaPolicy } from '../pool/opena
 import { openAIRuntimeSignals } from '../pool/openai-account-runtime.mjs'
 import { normalizeVmConfig, memoryMiB } from '../vm/machine-spec.mjs'
 import { runtimeKind } from '../vm/runtime-kind.mjs'
-import { telemetryUploadInterval } from '../vm/worker-telemetry.mjs'
+import { telemetryUploadInterval } from '../vm/native-telemetry.mjs'
 
 export function ok(data, meta) {
   const out = { ok: true, data }
@@ -419,7 +422,7 @@ function releaseStaleHeaderBlock(unified) {
  * Bad templates must 400 rather than silently degrade at request time.
  */
 export function validatePersonaRoutingPatch(body = {}) {
-  const compat = body?.compatibility
+  const compat = canonicalPersonaCompat(body?.compatibility)
   if (!compat || typeof compat !== 'object') return []
   const problems = []
   if (compat.persona_preset != null && String(compat.persona_preset).trim() !== '') {
@@ -501,6 +504,13 @@ export function validatePersonaRoutingPatch(body = {}) {
   }
   if (compat.cache_ttl != null && !['5m', '1h'].includes(String(compat.cache_ttl).trim())) {
     problems.push(`cache_ttl 必须是 5m / 1h，收到 ${compat.cache_ttl}`)
+  }
+  if (
+    compat.cc_entrypoint != null &&
+    compat.cc_entrypoint !== '' &&
+    !['sdk-cli', 'cli'].includes(String(compat.cc_entrypoint).trim())
+  ) {
+    problems.push(`cc_entrypoint 必须是 sdk-cli / cli，收到 ${compat.cc_entrypoint}`)
   }
   if (compat.claude_code_only != null && typeof compat.claude_code_only !== 'boolean') {
     problems.push('claude_code_only 必须是布尔')
@@ -852,6 +862,9 @@ export async function buildVmDetail({
     vmId: summary.id,
     accountId: acc?.account_id || summary.account_uuid,
     requestLog,
+    windowHistory: gpt ? vm.codex?.window_history : acc?.window_history,
+    estimate5h: summary.estimate_5h,
+    coveredSince: billing?.log_coverage_start,
   })
   const inferenceEngine = gpt ? null : summary.resolved_inference_engine || 'rust'
   let goHealth = null
@@ -1762,8 +1775,17 @@ function mergeVmProxy(v, poolSnap, { role = 'admin', nodes = [] } = {}) {
 
 function enrichVm(v, accountQuota, active, extras = {}) {
   if (extras.projectRoot && isLeftoverQuotaScheduleOff(v)) {
-    setVmSchedulable(extras.projectRoot, v.id, true, null, { preserveStatus: true, source: 'force' })
-    v = { ...v, schedulable: true, schedule_disabled_reason: null }
+    migrateVmSchedule(extras.projectRoot, v.id)
+    const fresh = getVm(extras.projectRoot, v.id)
+    if (fresh) {
+      v = {
+        ...v,
+        schedulable: fresh.schedulable,
+        schedule_manual: fresh.schedule_manual,
+        schedule_disabled_reason: fresh.schedule_disabled_reason,
+        ...pickScheduleFields(fresh),
+      }
+    }
   }
   const acc = findAccount(accountQuota, v)
   const runtime = findRuntime(accountQuota, v)
@@ -1922,13 +1944,16 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     v.cooldown_reason ||
     availability.reason ||
     null
+  const circuit = isCodex ? null : circuitViewFor(v, extras.projectRoot)
+  const seatsMax = isCodex ? null : resolveSessionSlots(v, extras.routingConfig || {})
   const triad = resolveScheduleState({
-    schedulable: v.schedulable !== false,
-    scheduleManual: v.schedule_manual === true,
-    scheduleDisabledReason: v.schedule_disabled_reason || null,
+    vm: v,
     availability,
     restrictionUntil,
     restrictionReason,
+    circuit,
+    seats: isCodex ? null : { used: Number(seatRow?.seats_used) || 0, max: seatsMax },
+    sessions: isCodex ? { active: codexSessions?.active, max: codexSessions?.max } : null,
   })
   return {
     id: v.id,
@@ -2065,8 +2090,14 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     schedule_state: triad.schedule_state,
     restriction_reason: triad.restriction_reason,
     restriction_until: triad.restriction_until,
+    restriction_text: triad.restriction_text,
+    restriction_scope: triad.restriction_scope,
+    restriction_soft: triad.restriction_soft,
+    unschedulable_reason: triad.unschedulable_reason,
+    unschedulable_text: triad.unschedulable_text,
+    unschedulable_detail: triad.unschedulable_detail,
     // Claude unit circuit (Codex has its own failover set and never trips it).
-    circuit: isCodex ? null : circuitViewFor(v, extras.projectRoot),
+    circuit,
     refresh_error: v.refresh_error || v.claude?.refresh_error || runtime?.refresh_error || null,
     ...(isCodex
       ? {
@@ -2076,9 +2107,11 @@ function enrichVm(v, accountQuota, active, extras = {}) {
         }
       : {}),
     // Live seat book from the seat planner (Claude only).
+    // seats_used counts sessions holding a slot, including ones kept until sticky TTL.
     seats_used: isCodex ? null : Number(seatRow?.seats_used) || 0,
-    seats_max: isCodex ? null : resolveSessionSlots(v, extras.routingConfig || {}),
+    seats_max: seatsMax,
     seats_grace: isCodex ? null : Number(seatRow?.seats_grace) || 0,
+    seat_sessions: isCodex ? null : Array.isArray(seatRow?.sessions) ? seatRow.sessions : [],
     queue_depth: isCodex ? null : Number(seatRow?.queue_depth) || 0,
     conc_waiting: isCodex ? null : Number(seatRow?.conc_waiting) || 0,
     inflight: isCodex ? openAIRuntimeSignals(v.id).inFlight : Number(seatRow?.inflight ?? acc?.inflight ?? 0),
@@ -2100,6 +2133,8 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     schedulable: v.schedulable !== false,
     schedule_manual: v.schedule_manual === true,
     schedule_disabled_reason: v.schedule_disabled_reason || null,
+    schedule_off: v.schedule_off === true,
+    schedule_hold: v.schedule_hold || null,
     created_at: v.created_at || null,
   }
 }
@@ -2483,7 +2518,32 @@ function windowEstimates(quota, cost, coveredSince, codex) {
   }
 }
 
-function buildAccountBilling(cost, billing, { vmId, accountId, requestLog } = {}) {
+/** The last closed 5h / 7d window with its official spend, from the slot's window archive. */
+function closedWindowView(history, key, { vmId, accountId, requestLog }) {
+  const win = lastClosedWindow(history, key)
+  if (!win) return null
+  let row = null
+  try {
+    // `until` is inclusive in the log filter; stop 1 ms short so the boundary request counts once.
+    row = requestLog?.costBetween?.({ since: win.start, until: Date.parse(win.end) - 1, vmId, accountId }) || null
+  } catch {
+    row = null
+  }
+  return {
+    start: win.start,
+    end: win.end,
+    used_ratio: win.used_ratio,
+    ...(periodView(row) || periodView({})),
+    tokens: tokenTotal(row),
+    unpriced: Number(row?.unpriced || 0),
+  }
+}
+
+function buildAccountBilling(
+  cost,
+  billing,
+  { vmId, accountId, requestLog, windowHistory = null, estimate5h = null, coveredSince = null } = {},
+) {
   if (!cost && !vmId && !accountId) return null
   const today = periodView(cost?.today) || {
     requests: Number(cost?.today_requests || 0),
@@ -2538,6 +2598,9 @@ function buildAccountBilling(cost, billing, { vmId, accountId, requestLog } = {}
   } catch {
     usageStats = null
   }
+  const scope = { vmId, accountId, requestLog }
+  const prev5h = closedWindowView(windowHistory, '5h', scope)
+  const prev7d = closedWindowView(windowHistory, '7d', scope)
   return {
     source: billing?.source || 'anthropic-official',
     currency: billing?.currency || 'USD',
@@ -2547,6 +2610,14 @@ function buildAccountBilling(cost, billing, { vmId, accountId, requestLog } = {}
     today,
     window_5h: window5h,
     window_7d: window7d,
+    prev_window_5h: prev5h,
+    prev_window_7d: prev7d,
+    window_5h_projection: projectWindowRemaining({
+      live: estimate5h,
+      closed: prev5h,
+      spentUsd: window5h?.total_cost,
+      coveredSince,
+    }),
     total,
     by_model: byModel,
     usage_stats: usageStats,

@@ -209,6 +209,7 @@ export type NotifyEvents = {
   invalid: boolean
   account_down: boolean
   account_up: boolean
+  vm_down: boolean
 }
 
 export type NotifyTelegramConfig = {

@@ -62,17 +62,17 @@
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/dashboard` | 总览：健康、KPI、`proxy_pool`、`ops`（默认近 1h SLA/TTFT）、`billing` |
-| GET | `/vms` | 列表（`has_token`、`cred_status`、`proxy_configured`、`can_import_credential`、`account_tier`、`schedule_level`、`schedule_level_mode`、`worker_credential`、Fable 轨；Claude 行 `seats_used` / `seats_max` / `seats_grace` / `queue_depth` / `conc_waiting` / `inflight`）；响应另带 `pool_queue: { global_queue_depth, queue_max }`。`availability.key` 取值 `ok` / `drain` / `quota` / `cool` / `rest` / `off` / `bad` / `none`，`drain` = 临近闸线（仍接单），`rest` = 工作时段外休息中 |
-| GET | `/pool/stream` | SSE。`event: seats`：`{ seats: { [vmId]: { seats_used, seats_max, seats_grace, queue_depth, conc_waiting, inflight } }, global_queue_depth, queue_max, ts }`，缺席的 VM 表示空闲；每次请求开始/结束都会推。`event: proxy`：`{ proxies: { [vmId]: { id, status, enabled, blocked_reason, latency_ms, last_error, last_probe_at } }, ts }`，每次探测或代理状态变化推送。两类帧都按 250ms 节流，租户只收到自己 VM 的条目 |
-| GET | `/vms/:id` | 详情 + 调度等级 + 代理健康 + `billing.today/window_5h/window_7d/by_model/usage_stats`（`usage_stats` = 近 30 个上海自然日的按日用量 + 模型 / 入站路径排名，日界同 `billing.today`） + `account.runtime_window` |
+| GET | `/vms` | 列表（`has_token`、`cred_status`、`proxy_configured`、`can_import_credential`、`account_tier`、`schedule_level`、`schedule_level_mode`、`worker_credential`、Fable 轨；Claude 行 `seats_used` / `seats_max` / `seats_grace` / `seat_sessions` / `queue_depth` / `conc_waiting` / `inflight`）。`seats_used` 是正在占槽的 client session 数，只含在飞请求和已排在这台 VM 上的后续请求；对话结束即释放，粘性 TTL 不占槽。`seats_grace` 只在重启交接的短窗口里计数；`seat_sessions` 是 `{ index, session_id, state, inflight, held_until }[]`，`state` 为 `active` 或 `held`。响应另带 `pool_queue: { global_queue_depth, queue_max }`。`availability.key` 取值 `ok` / `drain` / `quota` / `cool` / `rest` / `off` / `bad` / `none`，`drain` = 临近闸线（仍接单），`rest` = 工作时段外休息中 |
+| GET | `/pool/stream` | SSE。`event: seats`：`{ seats: { [vmId]: { seats_used, seats_max, seats_grace, queue_depth, conc_waiting, inflight, sessions } }, global_queue_depth, queue_max, ts }`，`sessions` 与列表的 `seat_sessions` 同形；缺席的 VM 表示空闲；每次请求开始/结束都会推。`event: proxy`：`{ proxies: { [vmId]: { id, status, enabled, blocked_reason, latency_ms, last_error, last_probe_at } }, ts }`，每次探测或代理状态变化推送。两类帧都按 250ms 节流，租户只收到自己 VM 的条目 |
+| GET | `/vms/:id` | 详情 + 调度等级 + 代理健康 + `billing.today/window_5h/window_7d/prev_window_5h/prev_window_7d/window_5h_projection/by_model/usage_stats`（`usage_stats` = 近 30 个上海自然日的按日用量 + 模型 / 入站路径排名，日界同 `billing.today`；`prev_window_*` 与 `window_5h_projection` 见下） + `account.runtime_window` |
 | PATCH | `/vms/:id` | 热改并发/RPM、OpenAI 会话上限、Claude 席位/配额、模型白名单、槽策略、Claude `schedule_level`、`weight`（Codex 选槽权重 1–100，`null` 回默认 1）、`active_hours` 或 `timezone`（不重启槽）。`timezone` 为任意有效 IANA 名称，会钉住该槽（后续绑定不覆盖）；`timezone_follow_proxy: true` 重新跟随已绑代理的出口时区 |
 | POST | `/vms/pool-policy` | 批量槽策略。`{ ids: [...] }` 或 `{ all: true }`，可带 `weight`(1–100) / `schedule_level`(1–10 或 `"auto"`) / `max_concurrency`(1–256) / `max_rpm`(0–1000000) / `max_sessions`(0–256)；`null`（或 `""`）取消钉住：weight 回默认 1、schedule_level 回 auto、上限回 tier / 全局默认，语义与逐槽 PATCH 一致。只写 `vms/*.json`、不重建槽详情，100+ 槽一次调用即可（逐个 `PATCH /vms/:id` 每槽约 4s，并发下发会压住控制面）。返回 `{ updated, missing, failed, items: [{ id, weight, schedule_level, max_concurrency, concurrency_override, max_rpm, max_sessions }] }` |
 | POST | `/vms/:id/probe` | 槽 SOCKS5 探官方 `/usage` + Fable（Pro 跳过 Fable） |
 | POST | `/vms/:id/exit-probe` | 测这个槽真实出口的 IP 与地理（仅 admin）：SOCKS5 槽经代理查；本地代理槽查它所在 VPS 那条本地代理并刷新该行地理。未绑定 502 `proxy_required` |
-| POST | `/vms/schedule/hold` | kernel 升级排空：`{ reason? }` 默认 `kernel_update`。将当前 **可调度** 槽标为不可调度（`schedule_disabled_reason=reason`，不改容器状态）；等待这些槽在途请求归零（最长约 120s）。成功 `{ paused, inflight: 0, drained: true }`。超时 409 `slots_busy`，**自动恢复** 本次 hold 的槽调度。手动关调度或凭证失效的槽不受影响 |
+| POST | `/vms/schedule/hold` | kernel 升级排空：`{ reason? }` 默认 `kernel_update`。给当前 **可调度** 槽加维护暂停（`schedule_hold={reason:'maintenance', detail:{tag:reason}}`，受限，不改容器状态）；等待这些槽在途请求归零（最长约 120s）。成功 `{ paused, inflight: 0, drained: true }`。超时 409 `slots_busy`，**自动恢复** 本次 hold 的槽。调度关与不可调度的槽不受影响 |
 | POST | `/vms/schedule/resume` | 与 hold 配对：`{ reason? }` 默认 `kernel_update`。恢复 `schedule_disabled_reason` 等于该 reason 的槽为可调度；返回 `{ restored }`。`deploy/install.sh upgrade` 在 kernel 同步后调用 |
-| POST | `/vms/:id/schedulable` | `{ schedulable }` 是否入池；不改容器 |
-| POST | `/vms/:id/cooldown/clear` | 清账号/模型冷却、粘性钉和 `/usage` 429 旗标，重新入池 |
+| POST | `/vms/:id/schedulable` | 操作员开关 `{ schedulable }`，不改容器。`false` = 调度关；`true` = 调度开，同时清除不可调度。凭证已失效或吊销时开启返回 409 `credential_unavailable`（先重新导入凭证） |
+| POST | `/vms/:id/cooldown/clear` | 清账号/模型冷却、粘性钉和 `/usage` 429 旗标；GPT 槽同时清除可恢复的 `codex.extra.codex_limited_until`，再重算调度，重新入池 |
 | POST | `/vms/:id/test-chat` | loopback `POST /v1/messages`，master 可钉槽；官方 CC 入站 + 4 块 system。默认 prompt `hello` |
 | GET/PUT/DELETE | `/vms/:id/test-schedule` | 每 VM 一条真实对话定时计划，回 `{ schedule }`。PUT 保存结构化调度 `{ enabled?, frequency, minute?, time?, weekdays?, timezone, model, prompt, max_tokens?, reasoning_effort? }`（`frequency`=`hourly`/`daily`/`weekly`；服务端内部编译五字段 cron，响应不回 `cron` 字符串）。`enabled` 缺省 `false`；Claude 用 `max_tokens`，Codex 用 `reasoning_effort`。GET/PUT 含最近结果、下次运行时间与运行状态；到点 `runVmTestChat` 并计用量；重启恢复计划但不补跑停机错过；删 VM 时清计划。租户可读写自己槽的计划 |
 | GET/PUT | `/test-schedule/default` | 全局默认调度模板（仅调度时间结构）。GET 所有已登录角色可读；**PUT 仅 admin/master**（body `{ schedule: { frequency, … } }`，`schedule: null` 清除） |
@@ -93,12 +93,12 @@
 | POST | `/vms/:id/wrap-cli/promote` | 从该槽晋升 wrap 文件，不复制凭证/SOCKS。下次 sync 仍优先仓内最新 kernel |
 | POST | `/vms/:id/wrap-cli/repair` | 单槽重装 kernel。`{ wrap, kernel }`；wrap 成功时 HTTP 200 |
 | POST | `/vms/:id/start` · `/stop` | 容器生命周期。运行中容器除非显式 recreate，禁止 `docker rm -f` |
-| POST | `/vms/:id/activate` | 标 active |
+| POST | `/vms/:id/activate` | 写入 `vms/active.json` 与 DB `active_vm`；列表/详情 `vm.active === true` 表示当前指针。管理台表格、机架、详情与行菜单可切换 |
 | POST | `/vms/:id/reset` | 销毁容器与家目录，再按原槽位重建（保留 ID/代理/种子；凭证清空） |
 | POST | `/vms/:id/reset-fingerprint` | |
 | POST | `/vms/:id/allocate-proxy` | 从池分配 SOCKS5 |
 | POST | `/vms/:id/update-claude-code` | 410，`claude_cli_removed` |
-| DELETE | `/vms/:id` | 不能删 active；只解绑本槽代理 |
+| DELETE | `/vms/:id` | 多槽时不能删仍占 `active.json` 的槽（409 `switch active first`）；管理台删除确认可在有健康可调度候选时先 `activate` 再删。只解绑本槽代理 |
 | POST | `/vms/create` | 种子 VM + Claude Code home；依赖私有 `kin-computer`。未安装返回 400 `computer_service_missing`，身份生成失败返回 400 `computer_create_failed`。Docker 槽可在 `machine` 里可选传 `docker_cpus`（见下） |
 | POST | `/vms/import` | sessionKey 导入（必须已有 VM+代理） |
 | GET | `/vms/fleet-status` | 全槽更新状态 |
@@ -112,11 +112,37 @@
 
 `/vms`、`/vms/:id`、`/usage` 的账号行带窗口估算 `estimate_5h` / `estimate_7d` / `estimate_fable`（Fable 只在有 `7d_oi` 窗口的 Claude 号上非空）和 `window_fable_cost`。结构：`{ status, spent_usd, total_usd, remaining_usd, total_tokens, used_ratio }`。总量 = 窗口内官方费用 ÷ 已用比例，按官方价算，不乘分组倍率。`status` 不是 `ok` 时 `total_usd` / `remaining_usd` 为 `null`：`no_data`（无用量读数）、`no_reset`（无重置时间或已过期）、`log_gap`（日志没覆盖窗口起点，或已用比例动了但网关内无花费）、`low_usage`（已用 < 5%）、`unpriced`（窗口内有未定价请求）。token 字段 `total_tokens` / `today_tokens` / `window_*_tokens` 都是输入 + 输出 + 缓存读 + 缓存写，每类只算一次。
 
+`/vms/:id` 的 `billing.prev_window_5h` / `prev_window_7d` 是上一个已结束的额度窗口：`{ start, end, used_ratio, requests, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, total_cost, tokens, unpriced, … }`。`used_ratio`（0–1）是窗口结束前最后一次读到的已用比例；花费按 `[start, end)` 从请求日志汇总，官方价。窗口归档在每次额度写入时进行（Claude 存 accounts `extra.window_history`，GPT 存 `vm.codex.window_history`）：新读数的重置时间比当前窗口晚出半个窗口以上，或重置时间后移且已用比例下降超过 2 个百分点（重置券），就把旧窗口归档。上线后第一次翻转前为 `null`。`billing.window_5h_projection` = `{ source, total_usd, remaining_usd }`：`estimate_5h` 为 `ok` 时 `source: 'current'`；否则用上个 5H 窗口的「花费 ÷ 结束时已用」当总额度，`source: 'previous'`，剩余 = 总额度 − 本窗口花费。上个窗口已用 < 5%、有未定价请求、或日志没覆盖其起点时三项都为 `null`。
+
 `cred_status`：`无凭证` / `可用` / `5h 警告` / `5h 限制` / `7d 警告` / `7d 限制` / `普通限制` / `不可用` / `被吊销` / `探测失败`。Fable 不可用 / 7d_oi / 家族冷却不抬账号级限制。等级：官方 `/usage` 有 Fable 模型或真实 7d_oi = Max；无 Fable 的 `plan_denied` = Pro。落盘 pro 不能盖掉 usage 里的 Fable。
 
 `account.runtime_window`：`rate_limited_at` / `rate_limit_reset_at` / `overload_until` / `session_window_start|end|status`。
 
 `schedule_level` 是当前有效调度等级，范围 1–10；`schedule_level_mode` 为 `manual` 或 `auto`。`PATCH {"schedule_level": 1..10}` 写入手动等级，`null` 或 `"auto"` 清除手动值。自动模式按 Claude 7D 重置剩余时间滚动分档：不足 24h 为 7，之后每 24h 降一级，144h 及以上或无有效重置时间为 1。Claude 同等级内按 `routing.pool.strategy`（`balanced` / `fill`）开新席位；`weight` 只用于 Codex 选槽，与调度等级无关。整池改这两项用 `POST /vms/pool-policy`（只写记录，不重建槽详情）。
+
+### 调度状态（四态）
+
+列表与详情的 `schedule_state` 只有四个值，调度与面板读同一个判定（`src/lib/pool/schedule-state.mjs`）：
+
+| `schedule_state` | 含义 | 怎么恢复 |
+|------------------|------|----------|
+| `on` | 调度开 | — |
+| `off` | 调度关，只由操作员写（`schedule_off`；关机为 `schedule_off_reason: "stopped"`） | 操作员调度开（关机的槽开机即恢复） |
+| `unschedulable` | 不可调度：确定性错误，`unschedulable_reason` / `unschedulable_text` / `unschedulable_detail` | 只能人工：调度开、导入凭证、改绑代理、「恢复服务」成功 |
+| `restricted` | 受限：额度、429、闸线、鉴权冷却、熔断、过载、代理异常、节点 / 内核故障、维护、休息时段、席位满 | 条件消失自动恢复 |
+
+不可调度原因：`no_credential`、`oauth_revoked`、`oauth_invalid_grant`、`oauth_no_refresh`、`oauth_cleared`、`oauth_expired`、`credential_refresh_failed`、`credential_blocked`、`organization_disabled`、`proxy_required`、`proxy_desynced`、`runtime_start_failed`、`legacy_unknown`（迁移时认不出的旧原因，需人工确认）。后台刷新、探活、worker 有票都不会开回不可调度；唯一例外是 `no_credential` / `oauth_cleared` 在磁盘上出现凭证后自动解除。
+
+受限另带 `restriction_text`（文案）、`restriction_scope` 与 `restriction_soft`：
+
+- `restriction_scope: "new_session"`：只拦新会话，已入座会话照常（`seats_full` 席位满、`sessions_full` GPT 对话窗口满、`gate_5h_draining` / `gate_7d_draining` 临近闸线）。
+- `restriction_soft: true`：全池没有 `on` 的槽时新会话仍可落上来（只有临近闸线）。
+
+优先级：`off` > `unschedulable` > `restricted`（额度 → 熔断 → 冷却 → 临近闸线 → 席位满）> `on`。调度关的槽若同时有不可调度原因，仍显示调度关，原因保留在 `unschedulable_*`。
+
+风险审计拦截（`distill_blocked`、`policy_blocked` / `refusal_guard`、硬正则与决策模型 403）发生在选槽之前，上游请求级错误（内容拒答、`invalid_request`、`*_repairable` 等）只影响本次请求：都不改变槽位状态。
+
+记录字段：`schedule_off`、`unschedulable{reason,detail,at}`、`schedule_hold{reason,detail,at}`（系统暂停：`maintenance` / `proxy_cooldown`，由写入方自己解除）。`schedulable` / `schedule_disabled_reason` / `schedule_manual` 每次写入时派生，保留给旧读者与回滚。升级后首次启动把旧记录迁到新字段，原文件备份到 `backups/schedule-migration-<ts>/`；上线前可用 `node scripts/replay-schedule-state.mjs --project <dir>` 预览迁移结果。设置 `routing.pool.manual_schedule_wins` 已移除（调度关不会被任何自动路径打开）。
 
 ### 平台独立的槽位限额
 
@@ -254,6 +280,8 @@ Analytics 按官方 [`codex_thread_initialized`](https://github.com/openai/codex
 
 `persona_env_presets[当前档]=false` 同时关闭生成的 `env`、`env_timezone_only`、`env_official` 和槽位 `timezone` 模板变量；官方完整档的 Environment 不再固定开启。空的生成环境块直接省略，不保留 cache / 零宽占位。调用方或自定义模板字面提供的环境和时区原样使用；关闭时 native 不剥掉调用方 Environment，HTTP 不按所选槽位改写其时区。控制台开关、预览和 Node 出站使用同一按档规则。
 
+所有提示词档统一为 2.1.303；`official_303` 不再是可选档，兼容读写时归一到 `official_full`。`persona_templates` 的块可指定 `role: "system"` 元数据：其文字装入 `messages[].role=system` 环境消息，不进入顶层 `system`。完整版新增 `env_instructions_303` 长环境说明宏；按档开关 `persona_env_instructions_presets`、`persona_timezone_presets`、`persona_locale_presets` 均默认关闭，分别加载长说明、时区、语言。环境总开关关闭时，这些选项及模型附加句均不生成；已有调用方环境不删除。预览区明确区分两个注入区域，并不等同于最终 CLI wire 抓包。
+
 ### OpenAI 全局额度
 
 ```json
@@ -318,7 +346,7 @@ Claude `routing.quota` 的 5h/7d 闸分三段（`critical_band` 默认 0.05，`g
 
 三个后端走同一套 `/v1/systemone`。题库存在 `questions`：可增删改，缺省是内置六题（综合、色情、破限、逆向、渗透、网络攻击）。每题都是「是否安全」，高分表示安全，启用的题目一起问，任一题低于阈值就拦。`safety_instruction` 非空时再多问一题自定义要求。`POST /jev-intercept/models` 用地址和 Key（留空则用已存的第一把）请求 `{base}/v1/models`，失败回 502，不会把上游 401 当成面板登出。
 
-内置正则覆盖 NSFW、蒸馏、破解、破限，面板删不掉。比较的是用户自己写下的正文，不含 user 轮里的 `tool_result` / `*_tool_result` / `function_call_output`；决策模型仍看 system。命中硬正则或模型返回 HTTP 403 `policy_blocked`，不 hop，不写入拒答缓存；device 封禁开启时封禁入站 device id。模型不可用且 `fail_open` 为 false 时同样 403，不封设备。上游 `content_policy` / `content_filter` / `cyber_policy` / `moderation_blocked` / `safety_violation` / `usage_policy` 同样入库。仅 admin。
+内置正则覆盖 NSFW、蒸馏、破解、破限，面板删不掉。比较的是用户自己写下的正文，不含 user 轮里的 `tool_result` / `*_tool_result` / `function_call_output`，也不含 `system`、`instructions`、`# Environment` 和已闭合的 `<system-reminder>`。决策模型只看这些用户正文；多轮时当前用户句再附在末尾。命中硬正则或模型返回 HTTP 403 `policy_blocked`，不 hop，不写入拒答缓存；device 封禁开启时封禁入站 device id。模型不可用且 `fail_open` 为 false 时同样 403，不封设备。上游 `content_policy` / `content_filter` / `cyber_policy` / `moderation_blocked` / `safety_violation` / `usage_policy` 同样入库。仅 admin。
 
 账号范围（`account_platform_plans[]`、`account_ids[]`，都可为空）把关卡收窄到部分槽位。每一项是 `平台:套餐`，例如 `claude:max`、`gpt:plus`、`gpt:business`；`none` 是没标注套餐。Claude 的 Max/Pro 与虚拟机列表相同（usage 里有 Fable 就是 Max，盖过落盘的 Pro）。指定账号收槽位 id、邮箱或名称，和勾选取并集，全空 = 所有账号都进关卡。只选了 GPT 套餐时 Claude 仍全部进关卡；选了 Claude 套餐或指定账号后，Claude 在选中槽位后再判，没命中的放行。GPT 一旦有范围就只由范围决定，没有范围时仍看 `openai_platform_enabled`。`GET` / `PUT` 都回 `account_scope.account_platform_plan_options`（带当前槽位数）和槽位清单（每条有 `scope_key`）。旧的 `account_types` 不再参与判断；只写过 `account_plan_types`、还没有 `account_platform_plans` 的配置会收成对应的 GPT 套餐（`none` 同时包含两边的未标注）。
 
@@ -338,6 +366,19 @@ Claude `routing.quota` 的 5h/7d 闸分三段（`critical_band` 默认 0.05，`g
 创建密钥只在响应里明文出现一次。存储为 HMAC 索引。`group_type` 为 `all`（默认，全局可调度）、`anthropic` 或 `openai`。后两个必须带 `allowed_vms`（该平台的 VM id，可多台）。`vm_pool_id` 绑定命名账号池：成员以池为准，不复制到密钥；`allowed_vms` 被清空。池停用、为空或不存在时请求返回 403 `vm_pool_unavailable`，不回落到全局池。改成员或解除绑定对下一次请求生效，包括已有粘性会话。一台槽只属于一个池。缺字段的旧密钥视为 `all`。`GET /api-keys/:id/stats` 是该密钥近 30 天用量：上海日桶、模型分布、VM 分布。不是 VM 的上游额度窗口。
 
 attempts：每次选中的 VM/账号、错误域、cooldown、提交边界、终态。`normal` 摘要；`debug` 另存入站原文及脱敏出站数据。`outbound_body` 仍为最后一次真正 POST 给 worker 的 envelope body，Node → worker 的头为 `worker_envelope_headers`。`outbound_headers_source=cli_final` 表示 `outbound_headers` 来自 cli-node 完成组装、CCH 和长度处理后的最终 fetch 调用边界；不包含底层补的 Host / HTTP/2 伪头，凭证及未知自定义头值已在 CLI 脱敏。每次重试覆盖，最后一次尝试未回传则 source=`unavailable`、headers=null，绝不以 envelope 代替。旧记录没有 source，原值不能视作最终值。最终 HTTP body 字节仍不在日志里。该功能需升级 Node、web 与 cli-node，旧 CLI 不支持回传。`X-Request-ID` 回写。`X-Kin-Debug` / `X-Kin-Log` 可单请求覆盖，但出站数据仅按管理员配置的 debug 采样保存。
+
+日志性能（`GET /usage-logs` 为 camelCase，`/request-logs` 与导出为 snake_case）：
+
+| 字段 | 定义 |
+|------|------|
+| `ttftMs` / `first_token_ms` | 请求入口到首个实际生成内容/进度；text、thinking、工具名称/参数均可触发，不把 `message_start`、空块或生命周期元数据当 token。 |
+| `firstByteMs` / `first_byte_ms` | 请求入口到首个上游协议事件的接收时间；独立于 TTFT。内部诊断帧不计。 |
+| `generationMs` / `generation_ms` | 首个上游协议事件到终止生成事件的实测窗口：Claude `message_delta.stop_reason`（缺失时 `message_stop`）、OpenAI `response.completed` / `response.done` / `response.incomplete`；不含随后 HTTP EOF、trailer 与收尾。 |
+| 输出速率 | `outputTokens × 1000 / generationMs`。输出 token 包含推理，窗口也包含不可见推理；不是 `output / (总耗时 − TTFT)`。 |
+| `cacheCreationInputTokens` / `cache_creation_tokens` | 上游明确报告的缓存写入量；未报告时 `null`，明确 0 保留 0。不从未缓存输入、缓存未命中或 `input − cached` 推算。 |
+
+以上是网关观测的流式时序，不是上游模型内部逐 token 的计算时间。迁移 043 之前的记录没有实测输出窗口；同一接收批次内完成、未收到生成内容/进度或流未正常终结时，速率不可测，页面不显示估算 tok/s。详情「总令牌数」=`inputTokens + outputTokens + cacheReadInputTokens + (cacheCreationInputTokens ?? 0)`，输入为不含缓存的互斥口径。OpenAI `reasoning_tokens` 已在 output 内，不能再累加。升级需同时更新 Node / web 和重新构建的 API 内核（SSE flush），无需更新 native CLI payload；历史写入 0 不自动改写为未知。
+
 
 ### 账号池
 

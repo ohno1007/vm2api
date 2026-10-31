@@ -81,7 +81,7 @@ export const PERSONA_TEMPLATE_VARS: [string, string][] = [
   ['billing_semi', '同 billing，但保证以分号结尾，供同一行继续拼接'],
   [
     'identity',
-    "官方身份句 You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+    "官方身份句 You are Claude Code, Anthropic's official CLI for Claude.",
   ],
   [
     'identity_cli',
@@ -110,7 +110,15 @@ export const PERSONA_TEMPLATE_VARS: [string, string][] = [
   ['cwd', '调用方 cwd（已清洗）'],
   ['cli_version', '官方 CLI 版本号'],
   ['session_id', '出站会话 id'],
-  ['main_prompt_303', '官方 2.1.303 lean 主提示词（记忆目录按槽位填写）'],
+  [
+    'main_prompt_303',
+    '官方 2.1.303 harness + guidance（记忆目录跟随调用方 cwd，无 cwd 时删除记忆段）',
+  ],
+  ['harness_303', '官方 2.1.303 harness。1h 时带 scope global'],
+  [
+    'guidance_303',
+    '官方 2.1.303 guidance（记忆目录跟随调用方 cwd，无 cwd 时删除记忆段）',
+  ],
   [
     'env_303',
     '官方 2.1.303 Environment 段（槽位身份 + 调用方 cwd / git / shell）',
@@ -150,31 +158,37 @@ export const DEFAULT_PERSONA_TEMPLATES: Record<PersonaPreset, PersonaBlock[]> =
       },
       {
         id: 'identity',
-        note: '交互 CLI 身份句',
+        note: '官方 CLI 身份句，不打缓存点',
         type: 'text',
-        text: '{{identity_cli}}',
+        text: '{{identity}}',
       },
       {
-        id: 'agent',
-        note: '常驻约束 + 调用方官方提示词。空则丢弃。1h 断点在本块，排在会变的第5段之前。',
+        id: 'harness',
+        note: '2.1.303 harness。常驻约束放在段首，空则丢弃',
         drop_if_empty: true,
         type: 'text',
-        text: '{{agent_standing}}{{caller_agent}}',
-        cache_control: { type: 'ephemeral', ttl: '1h' },
+        text: '{{agent_standing}}{{harness_303}}',
+        cache_control: { type: 'ephemeral', scope: 'global' },
       },
       {
-        id: 'env',
-        note: '槽位 Environment（时区），按档开关，排在 agent 之后不破 1h 前缀缓存',
-        drop_if_empty: true,
+        id: 'dynamic_boundary',
+        note: 'cli-node 拆分点。标记本身不出站',
         type: 'text',
-        text: '{{env}}',
+        text: '{{dynamic_boundary}}',
+      },
+      {
+        id: 'guidance',
+        note: '2.1.303 guidance。断点 TTL 取面板缓存 TTL，不带 scope',
+        type: 'text',
+        text: '{{guidance_303}}',
+        cache_control: { type: 'ephemeral' },
       },
       {
         id: 'caller_system',
-        note: '第5段可选。只放顶层 system。role=system 留在消息列表。空则丢弃',
+        note: '第三方 system。不进顶层 system，包成 <system-reminder> 放在第一条 user 最前面',
         drop_if_empty: true,
         type: 'text',
-        text: '{{caller_system}}',
+        text: '<system-reminder>\n{{caller_system}}\n</system-reminder>\n',
       },
     ],
     official_full: [
@@ -186,23 +200,36 @@ export const DEFAULT_PERSONA_TEMPLATES: Record<PersonaPreset, PersonaBlock[]> =
       },
       {
         id: 'identity',
-        note: '2.1.303 Agent SDK 身份句；实抓首两 system 块无 cache_control',
+        note: '官方 CLI 身份句，不打缓存点',
         type: 'text',
         text: '{{identity}}',
       },
       {
-        id: 'agent_official',
-        note: '2.1.303 完整提示词稳定段；动态工具、skills、memory 和日期仍由调用路径提供',
+        id: 'harness',
+        note: '2.1.303 harness。常驻约束放在段首',
         type: 'text',
-        text: '{{agent_standing}}{{agent_official}}',
-        cache_control: { type: 'ephemeral', ttl: '1h' },
+        text: '{{agent_standing}}{{harness_303}}',
+        cache_control: { type: 'ephemeral', scope: 'global' },
+      },
+      {
+        id: 'dynamic_boundary',
+        note: 'cli-node 拆分点。标记本身不出站',
+        type: 'text',
+        text: '{{dynamic_boundary}}',
+      },
+      {
+        id: 'guidance',
+        note: '2.1.303 完整提示词。断点 TTL 取面板缓存 TTL',
+        type: 'text',
+        text: '{{agent_official}}',
+        cache_control: { type: 'ephemeral' },
       },
       {
         id: 'env_official',
-        note: '2.1.303 Environment / continuation；动态段保持按槽位和调用方事实生成',
+        note: '2.1.303 Environment。按档开关',
+        drop_if_empty: true,
         type: 'text',
         text: '{{env_official}}',
-        cache_control: { type: 'ephemeral', ttl: '1h' },
       },
       {
         id: 'env_extra',
@@ -221,37 +248,10 @@ export const DEFAULT_PERSONA_TEMPLATES: Record<PersonaPreset, PersonaBlock[]> =
     ],
     zero: [
       {
-        id: 'billing_zero',
-        hide: true,
+        id: 'billing',
+        note: '0注入计费头，官方身份句放在 prompt_version；调用方 system 另按原块保留',
         type: 'text',
-        text: '{{billing_semi}} prompt_version=<{{identity_cli}}>',
-      },
-      {
-        id: 'identity_slot',
-        hide: true,
-        type: 'text',
-        text: '\u200b',
-      },
-      {
-        id: 'agent_slot',
-        hide: true,
-        type: 'text',
-        text: '{{agent_standing}}',
-        cache_control: { type: 'ephemeral', ttl: '1h' },
-      },
-      {
-        id: 'env',
-        hide: true,
-        drop_if_empty: true,
-        type: 'text',
-        text: '{{env}}',
-      },
-      {
-        id: 'caller_system',
-        note: '第5段可选。调用方 system 都写这里，空则丢弃',
-        drop_if_empty: true,
-        type: 'text',
-        text: '{{caller_system}}',
+        text: '{{billing_semi}} prompt_version=<{{identity}}>',
       },
     ],
     custom: [],
@@ -264,21 +264,33 @@ export const DEFAULT_PERSONA_TEMPLATES: Record<PersonaPreset, PersonaBlock[]> =
       },
       {
         id: 'identity',
-        note: '交互 CLI 身份句。断点 TTL 取面板缓存 TTL',
+        note: '官方 --print 身份句，不打缓存点',
         type: 'text',
-        text: '{{identity_cli}}',
-        cache_control: { type: 'ephemeral' },
+        text: '{{identity}}',
       },
       {
-        id: 'main',
-        note: '2.1.303 lean 主提示词。reminder / Environment / 消息断点由档案决定，不在模板里',
+        id: 'harness',
+        note: '2.1.303 harness。1h 断点带 scope global',
         type: 'text',
-        text: '{{agent_standing}}{{main_prompt_303}}',
+        text: '{{agent_standing}}{{harness_303}}',
+        cache_control: { type: 'ephemeral', scope: 'global' },
+      },
+      {
+        id: 'dynamic_boundary',
+        note: 'cli-node 用它把前面的 harness 标成 1h global，后面的 guidance 标成 1h。标记本身不出站',
+        type: 'text',
+        text: '{{dynamic_boundary}}',
+      },
+      {
+        id: 'guidance',
+        note: '2.1.303 guidance。断点 TTL 取面板缓存 TTL，不带 scope',
+        type: 'text',
+        text: '{{guidance_303}}',
         cache_control: { type: 'ephemeral' },
       },
       {
         id: 'env_extra',
-        note: 'Environment 之后的附加段。默认是当前模型句，可在本页改写或清空',
+        note: 'Environment 之后的附加段。默认是当前模型句，可在 system提示词页改写或清空',
         drop_if_empty: true,
         type: 'text',
         text: '{{model_sentence}}',
@@ -493,7 +505,8 @@ export function personaHideEnabled(
   }
   const legacy = parsePersonaHides(compat?.persona_hides)
   if (legacy != null) return legacy
-  return blocks.some((block) => block.hide === true)
+  // Mirrors gateway personaHidesUsageFromRoutingFile: zero masks by preset, not by block hide flags.
+  return preset === 'zero' || blocks.some((block) => block.hide === true)
 }
 
 /** 写 `persona_hide_presets[preset]`；回到模板默认且服务端没存过时去掉，避免无意义的 dirty。 */
@@ -684,6 +697,57 @@ export function presetSeed<K extends string>(
   return own && own.length ? own : defaults['official' as K]
 }
 
+/** Mirror the gateway's narrowly scoped migration of the saved 2.1.303 official default. */
+export function migrateLegacyOfficialTemplate(
+  preset: PersonaPreset,
+  blocks: readonly RawBlock[]
+): RawBlock[] {
+  if (preset !== 'official') return blocks as RawBlock[]
+  const legacy: RawBlock[] = [
+    ...DEFAULT_PERSONA_TEMPLATES.official
+      .filter((block) =>
+        [
+          'billing',
+          'identity',
+          'harness',
+          'dynamic_boundary',
+          'guidance',
+        ].includes(String(block.id))
+      )
+      .map((block) =>
+        block.id === 'identity' ? { ...block, text: '{{identity_cli}}' } : block
+      ),
+    ...['env', 'env_timezone', 'env_locale'].map((id) => ({
+      id,
+      role: 'system',
+      drop_if_empty: true,
+      type: 'text',
+      text: `{{${id === 'env' ? 'env_303' : id}}}`,
+    })),
+  ]
+  const shape = (value: RawBlock) => {
+    if (!value || typeof value !== 'object') return value
+    const { note: _note, ...block } = value
+    return block
+  }
+  const stable = (value: unknown) =>
+    JSON.stringify(value, (_key, item) =>
+      item && typeof item === 'object' && !Array.isArray(item)
+        ? Object.fromEntries(
+            Object.entries(item).sort(([a], [b]) => a.localeCompare(b))
+          )
+        : item
+    )
+  if (stable(blocks.map(shape)) !== stable(legacy.map(shape)))
+    return blocks as RawBlock[]
+  return [
+    ...blocks,
+    DEFAULT_PERSONA_TEMPLATES.official.find(
+      (block) => block.id === 'caller_system'
+    )!,
+  ]
+}
+
 /**
  * 草稿与内置预设逐字节相同就存 `[]`，让后端继续用它自己的预设，
  * 这样以后预设改进还能自动到达生产。只有真编辑过才落成显式块列表。
@@ -812,7 +876,7 @@ export function templateBlockEnabled(
   preset: PersonaPreset,
   id: string
 ): boolean {
-  if (preset !== 'official_full') return true
+  if (!['zero', 'official', 'official_full'].includes(preset)) return true
   const selected = (
     compat?.persona_block_presets as Record<string, unknown> | undefined
   )?.[preset]
@@ -856,7 +920,7 @@ export function selectedPreviewBlocks(
     templateBlockEnabled(compat, preset, String(block.id ?? ''))
   )
   if (
-    preset !== 'official_full' ||
+    !['zero', 'official', 'official_full'].includes(preset) ||
     !presetFlagEnabled(compat, 'persona_env_presets', preset) ||
     templateBlockEnabled(compat, preset, 'env_official')
   ) {
@@ -938,7 +1002,8 @@ function withStandingSlot(
  */
 export function previewSystemBlocks(
   blocks: readonly RawBlock[],
-  vars: Record<string, string>
+  vars: Record<string, string>,
+  { preserveCallerSystem = false } = {}
 ): SystemPreviewBlock[] {
   const source = withStandingSlot(blocks, vars.agent_standing || '')
   const out: SystemPreviewBlock[] = []
@@ -965,6 +1030,22 @@ export function previewSystemBlocks(
       ttl: typeof cc.ttl === 'string' ? cc.ttl : '',
       scope: typeof cc.scope === 'string' ? cc.scope : '',
       placeholder: blank || text === EMPTY_BLOCK_TEXT,
+    })
+  }
+  if (
+    preserveCallerSystem &&
+    vars.caller_system?.trim() &&
+    !blocks.some((block) =>
+      extractTemplateVars(block.text).includes('caller_system')
+    )
+  ) {
+    out.push({
+      id: 'caller_system',
+      text: vars.caller_system,
+      hide: false,
+      ttl: '',
+      scope: '',
+      placeholder: false,
     })
   }
   return out

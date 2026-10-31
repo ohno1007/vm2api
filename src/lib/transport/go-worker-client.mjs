@@ -6,7 +6,8 @@ import { prepareOutboundHeaders } from '../protocol/outbound-attempt.mjs'
 import { sanitizeAnthropicBodyForBetaTokens } from '../protocol/anthropic-policy.mjs'
 import { withRequestProtocolBetas } from '../protocol/claude-code-betas.mjs'
 import { pinThreadBetas, rememberThreadTurn } from '../protocol/thread-betas.mjs'
-import { applyThinkingDisplay, thinkingDisplayMode } from '../protocol/thinking.mjs'
+import { applyThinkingDisplay, ensureOfficialPrintThinking, thinkingDisplayMode } from '../protocol/thinking.mjs'
+import { stripSubagentBilling } from '../identity/crs-persona.mjs'
 import { sealClaudeCodeCch } from '../identity/cch.mjs'
 import { ensureBillingAttribution } from '../identity/crs-persona.mjs'
 import { credentialModeFromOauth } from '../oauth/credential-mode.mjs'
@@ -34,6 +35,8 @@ import {
   isWrapConnectionError,
 } from '../core/errors.mjs'
 import { extraHeadersFromLimitError } from '../pool/quota-window.mjs'
+import { createStreamTiming } from '../protocol/stream-timing.mjs'
+import { mergeUsage } from '../protocol/openai-usage.mjs'
 
 const MAX_BODY = 64 * 1024 * 1024
 const credentialRefreshTail = new Map()
@@ -80,7 +83,16 @@ function readInternalToken(exec) {
 
 function workerRequest(
   exec,
-  { method = 'GET', requestPath, body = null, signal, timeoutMs = 180000, timeoutMode = 'overall', headers = {} } = {},
+  {
+    method = 'GET',
+    requestPath,
+    body = null,
+    signal,
+    timeoutMs = 180000,
+    timeoutMode = 'overall',
+    headers = {},
+    maxRequestBytes = 0,
+  } = {},
 ) {
   return new Promise((resolve, reject) => {
     const { socketPath } = workerPaths(exec)
@@ -89,6 +101,16 @@ function workerRequest(
       return
     }
     const payload = body == null ? null : Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))
+    // Include the headers, session metadata and request_id added around the caller's body.
+    if (maxRequestBytes > 0 && payload?.length > maxRequestBytes) {
+      reject(
+        Object.assign(new Error(`Request envelope exceeds ${maxRequestBytes} bytes`), {
+          status: 413,
+          code: 'body_too_large',
+        }),
+      )
+      return
+    }
     const internalToken = readInternalToken(exec)
     const requestHeaders = { ...headers }
     if (payload) {
@@ -175,10 +197,21 @@ async function readAll(stream, limit = MAX_BODY) {
   return Buffer.concat(chunks)
 }
 
-function parseJson(buffer) {
+function parseJson(buffer, status = 0) {
   try {
     return JSON.parse(String(buffer || ''))
   } catch {
+    if (status === 413) {
+      return {
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          code: 'body_too_large',
+          message: 'Request body exceeds the slot kernel limit',
+          details: { retryable: false },
+        },
+      }
+    }
     return {
       type: 'error',
       error: { type: 'worker_error', code: 'worker_invalid_json', message: String(buffer || '').slice(0, 400) },
@@ -231,19 +264,6 @@ function streamMetaFromHeaders(headers = {}) {
   }
 }
 
-function mergeUsage(current, next) {
-  if (!next || typeof next !== 'object') return current
-  const out = { ...(current || {}) }
-  for (const [key, value] of Object.entries(next)) {
-    if (value && typeof value === 'object' && !Array.isArray(value)) {
-      out[key] = { ...(typeof out[key] === 'object' && out[key] ? out[key] : {}), ...value }
-    } else {
-      out[key] = value
-    }
-  }
-  return out
-}
-
 /** First user-visible assistant output — never transport/terminal metadata alone. */
 export function isDownstreamCommitEvent(event) {
   if (!event || typeof event !== 'object') return false
@@ -271,54 +291,6 @@ export function isDownstreamCommitEvent(event) {
     )
   }
   return t.startsWith('response.output_')
-}
-
-/**
- * Timing starts at generated content, independently of downstream commitment.
- * A generated tool name is first output: name-only tools often never send a
- * parameter delta. Omitted thinking reports generated tokens without text.
- * Connection metadata, empty blocks, and trailers are not TTFT.
- * Shared Claude/Codex kernel stream path only; API transport still stamps the
- * first `data:` line in api-protocol.mjs.
- */
-function hasGeneratedContent(block) {
-  if (!block || typeof block !== 'object') return false
-  const nonempty = (value) => typeof value === 'string' && value.length > 0
-  if ([block.text, block.thinking, block.refusal].some(nonempty)) return true
-  if (block.type === 'redacted_thinking') return nonempty(block.data)
-  return (
-    (block.type === 'function_call' ||
-      block.type === 'custom_tool_call' ||
-      String(block.type || '').endsWith('tool_use')) &&
-    (nonempty(block.name) || nonempty(block.arguments) || nonempty(block.input))
-  )
-}
-
-function isFirstTokenEvent(event) {
-  if (!event || typeof event !== 'object') return false
-  const type = String(event.type || '')
-  if (type === 'content_block_delta') {
-    const delta = event.delta || {}
-    return (
-      [delta.text, delta.thinking, delta.partial_json, delta.refusal].some(
-        (value) => typeof value === 'string' && value.length > 0,
-      ) ||
-      (delta.type === 'thinking_delta' && Number.isFinite(delta.estimated_tokens) && delta.estimated_tokens > 0)
-    )
-  }
-  if (type === 'content_block_start') return hasGeneratedContent(event.content_block)
-  if (type.startsWith('response.') && type.endsWith('.delta')) {
-    return typeof event.delta === 'string' && event.delta.length > 0
-  }
-  if (type === 'response.content_part.added' || type === 'response.content_part.done')
-    return hasGeneratedContent(event.part)
-  if (type === 'response.output_item.added' || type === 'response.output_item.done') {
-    return (
-      hasGeneratedContent(event.item) ||
-      (Array.isArray(event.item?.content) && event.item.content.some(hasGeneratedContent))
-    )
-  }
-  return false
 }
 
 /** Anthropic SSE: message_start.message.usage + message_delta.usage. OpenAI Responses: response.usage. */
@@ -443,6 +415,7 @@ export function finalizeWorkerPayload({
   want1m = false,
   cliHop = false,
   requestContext = null,
+  repaired = false,
 } = {}) {
   const model = body?.model || ''
   const credMode = credentialModeFromOauth(exec?.vm?.claude || {})
@@ -451,18 +424,19 @@ export function finalizeWorkerPayload({
     want1m: want1m === true,
   })
   const displayed =
-    requestContext?.purpose === 'auto_mode_classifier' ? body : applyThinkingDisplay(body, thinkingDisplayMode(routing))
+    requestContext?.purpose === 'auto_mode_classifier' || repaired
+      ? body
+      : ensureOfficialPrintThinking(applyThinkingDisplay(body, thinkingDisplayMode(routing)))
+  const main = stripSubagentBilling(displayed)
   const thread = pinThreadBetas(
-    displayed,
-    withRequestProtocolBetas(String(headers?.['anthropic-beta'] || '').split(','), displayed),
+    main,
+    withRequestProtocolBetas(String(headers?.['anthropic-beta'] || '').split(','), main),
   )
   const betas = thread.betas
   headers['anthropic-beta'] = betas.join(',')
   // Envelope headers are discarded; the existing MessageRequest.betas channel
   // carries request gates to the native CLI, which builds the actual HTTP wire.
-  const gated = cliHop
-    ? { ...displayed, betas }
-    : sanitizeAnthropicBodyForBetaTokens(displayed, headers['anthropic-beta'])
+  const gated = cliHop ? { ...main, betas } : sanitizeAnthropicBodyForBetaTokens(main, headers['anthropic-beta'])
   return {
     headers,
     body: sealClaudeCodeCch(ensureBillingAttribution(gated, { sessionId: identity?.callerSessionId || '' }), {
@@ -486,6 +460,7 @@ function workerEnvelope({
   cacheTtl = null,
   preserveCacheBreakpoints = null,
   cliHop = false,
+  repaired = false,
 } = {}) {
   const finalized = finalizeWorkerPayload({
     body,
@@ -496,6 +471,7 @@ function workerEnvelope({
     want1m,
     cliHop,
     requestContext,
+    repaired,
   })
   const envelope = {
     ...(requestContext ? { request_context: requestContext } : {}),
@@ -536,6 +512,7 @@ export async function callGoWorker({
   body,
   reqHeaders = {},
   timeoutMs,
+  maxRequestBytes = 0,
   identity = null,
   routing,
   signal,
@@ -545,6 +522,7 @@ export async function callGoWorker({
   requestPath = '/internal/v1/messages',
   envelope = null,
   cliHop = false,
+  repaired = false,
   onEnvelope = null,
 } = {}) {
   if (isCrsMock()) {
@@ -557,6 +535,7 @@ export async function callGoWorker({
       want1m,
       cliHop,
       requestContext,
+      repaired,
     })
     reportEnvelope(onEnvelope, { body: outboundBody, headers })
     writeCrsTrace({ body: outboundBody, headers, stream: false })
@@ -587,17 +566,19 @@ export async function callGoWorker({
           preserveCacheBreakpoints,
           cliHop,
           requestContext,
+          repaired,
         })
     reportEnvelope(onEnvelope, prepared.envelope)
     const response = await workerRequest(exec, {
       method: 'POST',
       requestPath,
       body: { ...prepared.envelope, request_id: requestId },
+      maxRequestBytes,
       signal,
       timeoutMs,
     })
     const data = await readAll(response)
-    const parsed = parseJson(data)
+    const parsed = parseJson(data, response.statusCode)
     const headers = mergeRateLimitHeaders(publicHeaders(response.headers))
     const ok = response.statusCode >= 200 && response.statusCode < 300 && parsed?.type !== 'error'
     if (ok) rememberThreadTurn(parsed?.id, prepared.thread)
@@ -617,19 +598,20 @@ export async function callGoWorker({
   } catch (error) {
     return {
       ok: false,
-      status: 0,
+      status: error.status === 413 ? 413 : 0,
       via: 'go-worker',
       body: {
         type: 'error',
         error: {
-          type: 'worker_error',
+          type: error.status === 413 ? 'invalid_request_error' : 'worker_error',
+          ...(error.status === 413 ? { details: { retryable: false } } : {}),
           code: error.code || 'worker_transport_error',
           message: String(error.message || error).slice(0, 300),
         },
       },
       headers: {},
-      terminalState: 'transport_error',
-      transportError: true,
+      terminalState: error.status === 413 ? 'rejected' : 'transport_error',
+      transportError: error.status !== 413,
     }
   } finally {
     stopCancel()
@@ -643,6 +625,7 @@ export async function streamGoWorker({
   reqHeaders = {},
   timeoutMs,
   idleTimeoutMs = 0,
+  maxRequestBytes = 0,
   identity = null,
   routing,
   signal,
@@ -655,6 +638,7 @@ export async function streamGoWorker({
   requestPath = '/internal/v1/messages',
   envelope = null,
   cliHop = false,
+  repaired = false,
   onEnvelope = null,
   onOutboundHeaders = null,
 } = {}) {
@@ -668,6 +652,7 @@ export async function streamGoWorker({
       want1m,
       cliHop,
       requestContext,
+      repaired,
     })
     reportEnvelope(onEnvelope, { body: outboundBody, headers })
     writeCrsTrace({ body: outboundBody, headers, stream: true })
@@ -716,12 +701,11 @@ export async function streamGoWorker({
         committed: false,
       }
     }
-    let mockTtftMs = null
+    const mockTiming = createStreamTiming(mockStartedAt)
     await emitMockSse(async (line) => {
       if (line.startsWith('data:')) {
         try {
-          if (mockTtftMs == null && isFirstTokenEvent(JSON.parse(line.slice(5))))
-            mockTtftMs = Date.now() - mockStartedAt
+          mockTiming.observe(JSON.parse(line.slice(5)))
         } catch {}
         if (typeof onCommit === 'function') onCommit()
       }
@@ -735,14 +719,11 @@ export async function streamGoWorker({
       usage: payload.body?.usage || null,
       model: payload.body?.model || null,
       stopReason: payload.body?.stop_reason || null,
-      ttftMs: mockTtftMs,
-      firstTokenAt: mockTtftMs == null ? null : mockStartedAt + mockTtftMs,
+      ...mockTiming.snapshot(),
     }
   }
   let committed = false
-  // Hop-relative TTFT. firstTokenAt is epoch ms so request logs subtract ingress t0.
-  const startedAt = Date.now()
-  let ttftMs = null
+  const timing = createStreamTiming()
   const requestId = randomUUID()
   const stopCancel = cancelOnAbort(exec, signal, requestId)
   try {
@@ -761,12 +742,14 @@ export async function streamGoWorker({
           preserveCacheBreakpoints,
           cliHop,
           requestContext,
+          repaired,
         })
     reportEnvelope(onEnvelope, prepared.envelope)
     const response = await workerRequest(exec, {
       method: 'POST',
       requestPath,
       body: { ...prepared.envelope, request_id: requestId },
+      maxRequestBytes,
       signal,
       timeoutMs,
       timeoutMode: 'first-byte',
@@ -779,7 +762,7 @@ export async function streamGoWorker({
         ok: false,
         status: response.statusCode || 0,
         via: 'go-worker-stream',
-        body: parseJson(data),
+        body: parseJson(data, response.statusCode),
         headers,
         committed: false,
         terminalState: headers['x-terminal-state'] || 'error',
@@ -788,6 +771,7 @@ export async function streamGoWorker({
       })
     }
     let buffer = ''
+    let receivedAt = null
     let lastError = null
     let dataBuf = ''
     let sseUsage = null
@@ -823,7 +807,7 @@ export async function streamGoWorker({
     }
     const observeSseEvent = (event) => {
       if (!event) return event
-      if (ttftMs == null && isFirstTokenEvent(event)) ttftMs = Date.now() - startedAt
+      timing.observe(event, receivedAt)
       if (event.type === 'response_headers' && event.headers && typeof event.headers === 'object') {
         sseRateHeaders = { ...sseRateHeaders, ...event.headers }
       }
@@ -861,6 +845,7 @@ export async function streamGoWorker({
       // job_done and its trailers afterward. Keep reading until the worker
       // closes the response so a normal completion is not mistaken for cancel.
       for await (const chunk of response) {
+        receivedAt = Date.now()
         buffer += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)
         let newline
         while ((newline = buffer.indexOf('\n')) >= 0) {
@@ -918,6 +903,14 @@ export async function streamGoWorker({
       }
       if (buffer && !outboundHeadersFrame) {
         applyClaudeSSELineToMessage(buffer, assembler)
+        if (buffer.startsWith('data:')) {
+          const piece = buffer.slice(5).trim()
+          if (piece && piece !== '[DONE]') {
+            dataBuf = dataBuf ? `${dataBuf}\n${piece}` : piece
+            const event = observeSseEvent(takeSseEvent())
+            if (isDownstreamCommitEvent(event)) await flushCommit()
+          }
+        }
         await emitLine(buffer)
       }
       if (dataBuf) {
@@ -945,8 +938,7 @@ export async function streamGoWorker({
         model: meta.model || sseModel || assembled?.model || null,
         stopReason,
         sawMessageStop,
-        ttftMs,
-        firstTokenAt: ttftMs == null ? null : startedAt + ttftMs,
+        ...timing.snapshot(),
         committed,
         terminalState,
         transportError: false,
@@ -959,29 +951,28 @@ export async function streamGoWorker({
     if (signal?.aborted) {
       return clientCancelledResult({
         via: 'go-worker-stream',
-        ttftMs,
-        firstTokenAt: ttftMs == null ? null : startedAt + ttftMs,
+        ...timing.snapshot(),
         committed,
       })
     }
     return {
       ok: false,
-      status: 0,
+      status: error.status === 413 ? 413 : 0,
       via: 'go-worker-stream',
       body: {
         type: 'error',
         error: {
-          type: 'worker_error',
+          type: error.status === 413 ? 'invalid_request_error' : 'worker_error',
+          ...(error.status === 413 ? { details: { retryable: false } } : {}),
           code: error.code || 'worker_transport_error',
           message: String(error.message || error).slice(0, 300),
         },
       },
       headers: {},
-      ttftMs,
-      firstTokenAt: ttftMs == null ? null : startedAt + ttftMs,
+      ...timing.snapshot(),
       committed,
-      terminalState: committed ? 'incomplete' : 'transport_error',
-      transportError: true,
+      terminalState: committed ? 'incomplete' : error.status === 413 ? 'rejected' : 'transport_error',
+      transportError: error.status !== 413,
     }
   } finally {
     stopCancel()
@@ -1168,6 +1159,36 @@ export async function importWorkerCredential(exec, credential, { timeoutMs = 600
       expires_at: credential?.expires_at || null,
       generation: Date.now(),
     },
+  }
+}
+
+export async function callWorkerPost(exec, requestPath, body, { timeoutMs = 20000, signal } = {}) {
+  try {
+    const response = await workerRequest(exec, {
+      method: 'POST',
+      requestPath,
+      body,
+      timeoutMs,
+      signal,
+      maxRequestBytes: 8192,
+    })
+    const parsed = parseJson(await readAll(response, 16384), response.statusCode)
+    return {
+      ok: response.statusCode >= 200 && response.statusCode < 300 && parsed?.ok !== false,
+      status: response.statusCode || 0,
+      body: parsed,
+      headers: publicHeaders(response.headers),
+      via: 'go-worker',
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      status: error.status === 413 ? 413 : 0,
+      body: { error: { code: error.code || 'worker_transport_error', message: 'Slot control request failed' } },
+      headers: {},
+      via: 'go-worker',
+      transportError: error.status !== 413,
+    }
   }
 }
 

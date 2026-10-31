@@ -13,7 +13,7 @@ import {
   persistVmQuotaOverride,
   persistVmSessionSlots,
   persistVmMaxSessions,
-  setVmSchedulable,
+  markUnschedulable,
 } from '../vm/vm-registry.mjs'
 import { normalizeInferenceConfig, normalizeSessionSlots, resolveInferenceEngine } from '../vm/slot-engine.mjs'
 import { slotExec } from '../vm/slot-runtime.mjs'
@@ -21,7 +21,6 @@ import { maxRequestBytes, streamIdleTimeoutMs } from '../core/config.mjs'
 
 import { accountTierKey, mergeTierMaps, normalizeTiers } from '../pool/quota-tiers.mjs'
 import { vmQuotaOverrideOf } from '../pool/vm-quota-override.mjs'
-import { setManualScheduleWins } from '../pool/schedule-policy.mjs'
 import { PoolScheduler, normalizePoolRouting } from '../pool/pool-scheduler.mjs'
 import { FailoverRunner } from '../pool/failover-runner.mjs'
 import { unitCircuit } from '../pool/unit-circuit.mjs'
@@ -51,9 +50,8 @@ import { isCodexVm } from '../vm/vm-kind.mjs'
 import { syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
 import { wakeOpenAIWaiter } from '../pool/openai-account-runtime.mjs'
 import { normalizeVmConfig } from '../vm/machine-spec.mjs'
-import { syncWorkerTelemetry } from '../vm/vm-runtime.mjs'
-import { slotHost } from '../vm/slot-host.mjs'
-import { telemetryUploadInterval } from '../vm/worker-telemetry.mjs'
+import { applyNativeTelemetry } from '../vm/fleet-update.mjs'
+import { telemetryUploadInterval } from '../vm/native-telemetry.mjs'
 
 export function createRoutingRuntime(ctx) {
   const getRouting = () => (typeof ctx.getRoutingConfig === 'function' ? ctx.getRoutingConfig() : ctx.routingConfig)
@@ -381,7 +379,8 @@ export function createRoutingRuntime(ctx) {
     return (
       Object.prototype.hasOwnProperty.call(compatibility, 'cache_ttl') ||
       Object.prototype.hasOwnProperty.call(compatibility, 'persona_preset') ||
-      Object.prototype.hasOwnProperty.call(compatibility, 'cch_enabled')
+      Object.prototype.hasOwnProperty.call(compatibility, 'cch_enabled') ||
+      Object.prototype.hasOwnProperty.call(compatibility, 'cc_entrypoint')
     )
   }
 
@@ -407,21 +406,24 @@ export function createRoutingRuntime(ctx) {
     return queued
   }
 
-  // The sidecar re-reads worker.json on mtime change, so a rewrite applies without a restart.
-  // Node slots read a pushed copy; that push is queued and only logged on failure.
-  function syncTelemetryUploadInterval(routingConfig) {
+  // Native slots hot-read kernel.json; publication must be acknowledged per VM.
+  async function syncTelemetryUploadInterval(routingConfig) {
     const project = ctx.cfg.paths.project
     const applied = { updated: 0, queued: 0, skipped: 0, failed: [] }
     for (const { id } of listVms(project)) {
       const vm = getVm(project, id)
       if (!vm || isCodexVm(vm)) continue
       try {
-        if (!syncWorkerTelemetry(vm, project, routingConfig).wrote) {
+        const result = await applyNativeTelemetry({ projectRoot: project, vm, routing: routingConfig })
+        if (result.supported === false) {
           applied.skipped += 1
           continue
         }
-        if (slotHost(vm).queueSyncRun(vm, path.join(project, 'vms', vm.id))) applied.queued += 1
-        else applied.updated += 1
+        if (!result.ok || !result.published) {
+          applied.failed.push(vm.id)
+          continue
+        }
+        applied.updated += 1
       } catch {
         applied.failed.push(vm.id)
       }
@@ -429,7 +431,7 @@ export function createRoutingRuntime(ctx) {
     return applied
   }
 
-  function persistRoutingPatch(body = {}) {
+  async function persistRoutingPatch(body = {}) {
     const hasCodexQuota = body?.codex && Object.prototype.hasOwnProperty.call(body.codex, 'quota')
     if (hasCodexQuota) validateOpenAIQuotaPatch(body.codex.quota)
     validateInferenceWebsocketPatch(body)
@@ -448,7 +450,6 @@ export function createRoutingRuntime(ctx) {
     if (body.concurrency) routingConfig.concurrency = { ...(routingConfig.concurrency || {}), ...body.concurrency }
     if (body.pool) {
       routingConfig.pool = normalizePoolRouting({ ...(routingConfig.pool || {}), ...body.pool })
-      setManualScheduleWins(routingConfig.pool.manual_schedule_wins)
     }
     if (body.failover) routingConfig.failover = { ...(routingConfig.failover || {}), ...body.failover }
     if (body.inference) {
@@ -534,7 +535,9 @@ export function createRoutingRuntime(ctx) {
     // Stream idle / body-limit still need an idle restart; CCH and sticky-slot TTL hot-read kernel.json.
     const kernelReload = idleChanged || requestBytesChanged ? reloadClaudeKernelsWhenIdle(routingConfig) : 0
     const telemetrySync =
-      telemetryUploadInterval(routingConfig) !== prevUploadInterval ? syncTelemetryUploadInterval(routingConfig) : null
+      telemetryUploadInterval(routingConfig) !== prevUploadInterval
+        ? await syncTelemetryUploadInterval(routingConfig)
+        : null
     // Pool and failover settings hot-reload into the live scheduler and runner.
     // Rebuilding them would drop the seat book and queues while their requests
     // still run (the panel sends `failover` with every routing save).
@@ -683,6 +686,7 @@ export function createRoutingRuntime(ctx) {
   }
 
   function initPoolRuntime() {
+    getPool()?.stopMaintenance()
     const routingConfig = getRouting()
     const runtimeRepo = new AccountRuntimeRepo()
     const attemptsRepo = new RequestAttemptsRepo()
@@ -701,6 +705,7 @@ export function createRoutingRuntime(ctx) {
       config: poolSchedulerConfig(),
     })
     setPool(poolScheduler)
+    poolScheduler.startMaintenance()
     configureUnitCircuit(routingConfig)
     ctx.accountQuota.onQuotaCooldownCleared = () => {
       try {
@@ -766,8 +771,17 @@ export function createRoutingRuntime(ctx) {
           return
         }
         if (policy?.reason === 'oauth_no_refresh' && shouldMarkMissingRefresh(selected.vm)) {
-          setVmSchedulable(ctx.cfg.paths.project, selected.vmId, false, 'oauth_no_refresh')
+          markUnschedulable(ctx.cfg.paths.project, selected.vmId, 'oauth_no_refresh')
         }
+      },
+      // Org refusal: 不可调度 even over the operator's "on"; only an operator action reopens it.
+      onSchedulePause: ({ selected, policy }) => {
+        if (!selected?.vmId) return
+        markUnschedulable(ctx.cfg.paths.project, selected.vmId, policy?.reason || 'organization_disabled', {
+          ...policy?.detail,
+          account_id: selected.accountId || null,
+          at: new Date().toISOString(),
+        })
       },
     })
     setFailover(failoverRunner)

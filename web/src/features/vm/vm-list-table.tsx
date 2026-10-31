@@ -5,6 +5,7 @@ import type { StatusTone } from '@/types/status'
 import { GripVertical, RotateCcw } from 'lucide-react'
 import { expiresAtToMs, fmtResetClock } from '@/lib/fable-status'
 import { fmtNum } from '@/lib/format'
+import { subscriptionListLabel } from '@/lib/subscription-expiry'
 import { tierVisual } from '@/lib/tier-visual'
 import { cn } from '@/lib/utils'
 import { isCodexVm, slotNameLabel } from '@/lib/vm-kind'
@@ -28,6 +29,7 @@ import {
 import { CredLaneChip, SlotIdentity } from '@/components/platform-chip'
 import { StatusMark } from '@/components/status-mark'
 import { ProxyChip } from '@/features/proxies/proxy-chip'
+import { ActiveVmBadge } from '@/features/vm/active-vm-badge'
 import { NodeChip } from '@/features/vm/node-chip'
 import { OpenaiPlanBadge } from '@/features/vm/openai-plan-badge'
 import { RuntimeChip } from '@/features/vm/runtime-chip'
@@ -350,10 +352,12 @@ function TierBadge({ vm }: { vm: Vm }) {
 function SlotCell({ vm, now }: { vm: Vm; now: number }) {
   const name = slotNameLabel(vm)
   const email = String(vm.email || '').trim()
+  const sub = subscriptionListLabel(vm, now)
   return (
     <div className='min-w-0 space-y-0.5 overflow-hidden'>
       <SlotIdentity vm={vm} compact className='text-sm font-medium' />
       <div className='flex min-w-0 items-center gap-1.5'>
+        <ActiveVmBadge vm={vm} />
         <TierBadge vm={vm} />
         <RuntimeChip vm={vm} />
         <NodeChip nodeId={vm.node_id} />
@@ -363,6 +367,17 @@ function SlotCell({ vm, now }: { vm: Vm; now: number }) {
         >
           {name}
         </span>
+      </div>
+      <div
+        className={cn(
+          'truncate font-mono text-[11px] tabular-nums',
+          sub.tone === 'bad' && 'text-[color:var(--status-bad)]',
+          sub.tone === 'warn' && 'text-[color:var(--status-warn)]',
+          sub.tone === 'muted' && 'text-muted-foreground'
+        )}
+        title={sub.title}
+      >
+        {sub.text}
       </div>
       <VmOwnerLine
         vm={vm}

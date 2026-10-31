@@ -3,6 +3,7 @@ import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
 import { resetCountdown } from '@/lib/fable-status'
 import { fmtNum, fmtUsd } from '@/lib/format'
+import { subscriptionListLabel } from '@/lib/subscription-expiry'
 import { cn } from '@/lib/utils'
 import { slotCredentialLabel } from '@/lib/vm-kind'
 import { vmCostLedger } from '@/lib/vm-usage'
@@ -104,7 +105,11 @@ export const VmUnit = memo(function VmUnit({
       </div>
       <div className='col-span-2 min-w-0'>
         <span
-          title={email || undefined}
+          title={
+            [email, subscriptionListLabel(vm, now).text]
+              .filter(Boolean)
+              .join('\n') || undefined
+          }
           className={cn(
             'block truncate text-[12.5px] font-semibold',
             !email && 'font-medium text-muted-foreground'
@@ -112,11 +117,7 @@ export const VmUnit = memo(function VmUnit({
         >
           {slotCredentialLabel(vm, true)}
         </span>
-        <SubscriptionExpiry
-          vm={vm}
-          now={now}
-          className='col-span-2 text-[10px]'
-        />
+        <SubscriptionExpiry vm={vm} now={now} className='text-[10px]' />
       </div>
       {state === 'live' ? (
         <span className='flex items-end gap-1.5'>

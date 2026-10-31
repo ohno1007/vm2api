@@ -13,8 +13,9 @@ checkout 本机构建。
 | Release 附件 | 无后缀：`kin-kernel`、`cli-node`、`kin-worker` 等 | `kin-worker-linux-arm64`、`kin-egress-linux-arm64` |
 
 无后缀附件保持 linux amd64，已部署的面板按原名下载 kernel / CLI。slot 内
-kernel、OAuth、CLI 和控制面造机服务 `kin-computer` 只有 amd64，ARM64 主机
-经 QEMU 运行它们；只有控制面自身的 Go helper 有原生 ARM64 版本。
+kernel、OAuth 和控制面造机服务 `kin-computer` 仍使用 amd64/QEMU。本机 Docker
+Claude 推理 CLI 使用镜像内单独构建的 ARM64 overlay；远程节点保持 amd64 发布物。
+控制面 Go helper 也有原生 ARM64 版本，详见文末 Native CLI 小节。
 
 版本参数可带架构后缀：`v1.2.3`、`v1.2.3-arm64`、`v1.2.3-aarch64` 都解析为
 版本 `v1.2.3`；后缀只用于核对，与宿主架构不一致时一键脚本和面板都会拒绝。
@@ -28,7 +29,8 @@ kernel、OAuth、CLI 和控制面造机服务 `kin-computer` 只有 amd64，ARM6
 
 控制镜像中的 Node.js 22、Python、iptables、Docker 27 CLI，以及静态 Go
 worker 和 egress 二进制均为 ARM64。已有 Rust kernels、OAuth 和 CLI 预编译
-资产仍为 amd64，由 QEMU 执行；slot 默认平台也是 `linux/amd64`。
+资产默认仍为 amd64；本机 Docker 推理 CLI 由 ARM64 overlay 替代，其他部分由 QEMU
+执行。slot 默认平台仍是 `linux/amd64`。
 构建从固定的 Ubuntu 24.04 amd64 stage 提取 glibc 2.39 等 x86 库，Go builder
 和最终控制平面 stage 使用 ARM64。
 
@@ -68,6 +70,20 @@ sudo bash /opt/vm2api/deploy/install.sh status
 在 ARM64 上脚本额外下载 `deploy/prepare-arm64.py`，启动前准备 QEMU handler
 （见下一节），然后拉取 `-arm64` 镜像。没有 ARM64 发布的旧版本会明确报错，
 不会回退到 amd64 镜像。`status` 显示宿主架构和当前镜像 tag。
+
+预构建镜像安装应使用 `docker-compose.yml`（及可选的 `docker-compose.override.yml` /
+自定义 overlay，**不要**含 `docker-compose.arm64.yml`）与
+`VM2API_IMAGE_TAG=vX.Y.Z-arm64`。若 `.env` 的 `COMPOSE_FILE` 仍含
+`docker-compose.arm64.yml`（例如先跑过 `deploy/init-arm64-env.py`），会叠加
+源码构建 override（默认镜像是 `vm2api-arm64-control:local`），而不是拉 ghcr
+的 `-arm64` 控制面。
+
+自 #746 起，**仅当执行新版** `deploy/install.sh`（`install` / `upgrade`）时，
+脚本会从 `COMPOSE_FILE` **去掉** `docker-compose.arm64.yml` 这一项，其它 overlay
+保留；若去掉后为空则写回 `docker-compose.yml`。**不会**为空的 `COMPOSE_FILE`
+写入默认值（避免 Compose 不再自动加载 `docker-compose.override.yml`）。
+**面板一键更新不会改 `.env`**；若仍用旧版 `install.sh` 升级，当次仍是旧逻辑，
+需再拉新版脚本执行一次 `upgrade`/`install`，或手动编辑 `COMPOSE_FILE`。
 
 ## 准备主机
 
@@ -175,3 +191,45 @@ QEMU 准备失败时先阅读脚本错误，再运行 `--check` 核对恢复后�
 备份后停止旧控制器，再制定与新挂载对应的迁移步骤。不要任意移动仍在使用
 的数据库，也不要同时启动两个会管理相同 slot 的控制器。成功验证登录、
 账户、slot 与实际请求后，再决定是否保留旧部署作为恢复入口。
+
+
+## Native CLI for local ARM64 Docker slots
+
+The ARM control image now builds a native CLI overlay. The Rust kernel and
+OAuth/cc-node payloads remain amd64/QEMU; only the long-lived inference CLI
+runs on native ARM64 Bun. This avoids a reproducible `native stdin write
+blocked for 10s` failure while sending large frames to the emulated CLI.
+
+`deploy/arm64-cli.json` pins the existing CLI, its embedded JavaScript, Bun
+and the unpacking tool by SHA-256. `deploy/build-native-cli.py` extracts only
+that exact source bundle, without changing its business logic, and packages
+the matching ARM64 Bun plus a private ARM64 glibc loader/library directory.
+Build tools are not installed globally. No account, token, live request or
+customer text is an input to this build. Extracted sources and binaries are
+build artifacts, not tracked repository files.
+
+The portable `share/wrap-cli` template remains amd64. `KIN_NATIVE_CLI_ROOT`
+selects the image-owned overlay only for local Linux ARM64 Docker Claude
+slots. Remote nodes (including amd64 nodes), KVM, Codex and amd64 controllers
+keep their existing payload selection. Source mismatch or a damaged overlay
+fails closed before changing a slot. Capturing an ARM-native slot as the
+portable template is rejected. A changed runtime participates in the normal
+kernel-sync/restart detection.
+
+When updating the pinned CLI payload, also review and update the native
+source/runtime manifest. The build and runtime checks deliberately reject an
+old native overlay against a new portable CLI; do not bypass the check or
+silently reuse a previous release's extracted source. Control-container startup
+still refreshes the portable assets normally; no persistent bind override of
+`image-wrap-cli/cli-node` is needed. Remove any earlier host-specific native CLI
+bind override before deploying this integrated image, after saving its rollback
+configuration and confirming the replacement native image has passed tests.
+
+CI builds the ARM control image and uses a network-disabled synthetic upstream
+for 15/32 MiB requests, four concurrent 15 MiB requests and cancellation/slot
+recovery. This does not consume a real account. It does not certify the full
+128 MiB concurrency limit, other guest images or long-duration performance.
+Production upgrades must still drain requests, preserve `.env`, `routing.json`,
+`vms/` and `data/`, retain a consistent database backup, and verify a real model
+request. Recover by deploying the saved previous image with the same volumes;
+do not restore an old database over new traffic without a separate data decision.

@@ -30,9 +30,9 @@ test('prepareCliHopBody drops metadata and CLI-owned system but keeps official a
     messages: [{ role: 'user', content: 'hi' }],
   })
   assert.equal(body.metadata, undefined)
-  assert.equal(body.system.length, 1)
-  assert.equal(body.system[0].text, CRS_OFFICIAL_AGENT_PROMPT)
-  assert.equal(body.system[0].cache_control, undefined)
+  assert.equal(body.system[0].text, CRS_OFFICIAL_CLI_SYSTEM)
+  assert.equal(body.system[0].cache_control.ttl, '1h')
+  assert.match(body.system[1].text, /You are an interactive agent/)
   assert.equal(body.model, 'claude-sonnet-5')
   assert.deepEqual(body.messages[0].content, [
     { type: 'text', text: 'hi', cache_control: { type: 'ephemeral', ttl: '1h' } },
@@ -40,7 +40,7 @@ test('prepareCliHopBody drops metadata and CLI-owned system but keeps official a
   assert.equal(body.stream, true)
 })
 
-test('preserveSystem forwards the inbound system unchanged', () => {
+test('every cli-hop system becomes the identity plus the caller body', () => {
   const billing = 'x-anthropic-billing-header: cc_version=2.1.280.096; cc_entrypoint=cli; cch=bdff0;'
   const body = prepareCliHopBody(
     {
@@ -55,16 +55,14 @@ test('preserveSystem forwards the inbound system unchanged', () => {
     },
     { preserveSystem: true },
   )
-  assert.equal(body.system.length, 3)
-  assert.equal(body.system[0].text, billing)
-  assert.equal(body.system[1].text, "You are Claude Code, Anthropic's official CLI for Claude.")
-  assert.equal(body.system[2].text, 'RFC 2119 keywords')
-  assert.equal(body.system[0].cache_control, undefined)
-  assert.equal(body.system[1].cache_control, undefined)
-  assert.deepEqual(body.system[2].cache_control, { type: 'ephemeral', ttl: '1h' })
+  assert.equal(body.system.length, 2)
+  assert.equal(body.system[0].text, "You are Claude Code, Anthropic's official CLI for Claude.")
+  assert.equal(body.system[1].text, 'RFC 2119 keywords')
+  assert.deepEqual(body.system[0].cache_control, { type: 'ephemeral', ttl: '1h' })
+  assert.deepEqual(body.system[1].cache_control, { type: 'ephemeral', ttl: '1h' })
 })
 
-test('preserveSystem keeps caller system markers and restamps the last user message', () => {
+test('cli-hop normalizes mixed caller markers to the official template', () => {
   const input = {
     model: 'claude-opus-5-5',
     max_tokens: 128,
@@ -80,22 +78,22 @@ test('preserveSystem keeps caller system markers and restamps the last user mess
     ],
   }
   const body = prepareCliHopBody(input, { preserveSystem: true, cacheTtl: '1h' })
-  assert.equal(body.system.length, 1)
-  assert.equal(body.system[0].text, 'caller')
-  assert.deepEqual(body.system[0].cache_control, { type: 'ephemeral', ttl: '5m', scope: 'global' })
+  assert.equal(body.system[0].text, CRS_OFFICIAL_CLI_SYSTEM)
+  assert.equal(body.system[1].text, 'caller')
+  assert.deepEqual(body.system[1].cache_control, { type: 'ephemeral', ttl: '1h' })
   assert.equal(body.messages[0].content[0].cache_control, undefined)
   assert.equal(body.messages[1].content[0].cache_control, undefined)
   assert.deepEqual(body.messages[2].content[0].cache_control, { type: 'ephemeral', ttl: '1h' })
 })
 
-test('caller environment is kept when persona env presets are off', () => {
+test('caller environment stays behind the official identity', () => {
   const caller = '  # Environment\n - Timezone: Pacific/Auckland\n - Caller-only fact: KEEP_ME\n '
   const body = prepareCliHopBody(
     { model: 'claude-opus-5-5', system: [{ type: 'text', text: caller }], messages: [{ role: 'user', content: 'hi' }] },
     { preserveCallerEnvironment: true },
   )
-  assert.equal(body.system.length, 1)
-  assert.equal(body.system[0].text, caller)
+  assert.equal(body.system[0].text, CRS_OFFICIAL_CLI_SYSTEM)
+  assert.equal(body.system[1].text, caller)
 })
 
 test('environment opt-out prevents HTTP slot selection from overwriting caller timezone', () => {
@@ -111,8 +109,7 @@ test('environment opt-out prevents HTTP slot selection from overwriting caller t
     preserveCallerEnvironment: true,
     credentialMode: 'api-key',
   })
-  assert.match(body.system[0].text, /^x-anthropic-billing-header:/)
-  assert.deepEqual(body.system.slice(1), [{ type: 'text', text: caller }])
+  assert.deepEqual(body.system, [{ type: 'text', text: caller }])
 })
 
 test('cli-hop passthrough rejects invalid caller markers instead of repairing them', () => {
@@ -155,8 +152,8 @@ test('prepareCliHopBody keeps caller leftover system and tools', () => {
     messages: [{ role: 'user', content: '你好呀。' }],
   })
   assert.equal(body.metadata, undefined)
-  assert.equal(body.system.length, 1)
-  assert.equal(body.system[0].text, '你是一个高速收费员。')
+  assert.equal(body.system[0].text, CRS_OFFICIAL_CLI_SYSTEM)
+  assert.equal(body.system[1].text, '你是一个高速收费员。')
   assert.equal(body.tools[0].name, 'get_weather')
   assert.equal(body.thinking.type, 'disabled')
 })
@@ -167,29 +164,31 @@ test('stripCliOwnedSystem leaves empty inbound system absent', () => {
   assert.equal(stripCliOwnedSystem([{ type: 'text', text: '' }]), undefined)
 })
 
-test('prepareCliHopBody follows summarized display and omits sampling and context_management', () => {
+test('prepareCliHopBody applies display but leaves model policy and sampling to cli-node', () => {
   const body = prepareCliHopBody({
     model: 'claude-sonnet-5',
     thinking: { type: 'adaptive' },
+    temperature: 0.2,
+    context_management: { edits: [] },
     messages: [{ role: 'user', content: 'hello' }],
   })
   assert.deepEqual(body.thinking, { type: 'adaptive', display: 'summarized' })
-  assert.equal(body.output_config.effort, 'high')
-  assert.equal(body.context_management, undefined)
-  assert.equal(body.temperature, undefined)
+  assert.equal(body.output_config, undefined)
+  assert.deepEqual(body.context_management, { edits: [] })
+  assert.equal(body.temperature, 0.2)
   assert.equal(body.metadata, undefined)
-  assert.equal(body.system, undefined)
 })
 
-test('prepareCliHopBody does not overwrite caller thinking disabled', () => {
+test('prepareCliHopBody keeps caller thinking disabled', () => {
   const body = prepareCliHopBody({
     model: 'claude-sonnet-5',
     max_tokens: 256,
     thinking: { type: 'disabled' },
+    context_management: { edits: [] },
     messages: [{ role: 'user', content: 'hi' }],
   })
   assert.equal(body.thinking.type, 'disabled')
-  assert.equal(body.context_management, undefined)
+  assert.deepEqual(body.context_management, { edits: [] })
 })
 
 test('prepareCliHopBody strips unsigned dummy and short thinking history', () => {
@@ -260,7 +259,7 @@ test('prepareCliHopBody keeps a short non-dummy signature on Opus 5.5', () => {
       { role: 'user', content: 'continue' },
     ],
   })
-  assert.equal(body.model, 'claude-opus-5-5')
+  assert.equal(body.model, 'claude-opus-5.5')
   assert.deepEqual(
     body.messages.map((message) => message.role),
     ['user', 'assistant', 'user'],
@@ -295,38 +294,17 @@ test('prepareCliHopBody repaired does not refill thinking after signature downgr
   ])
 })
 
-test('prepareCliHopBody disables thinking on Haiku so wrap CLI cannot inherit adaptive', () => {
-  const body = prepareCliHopBody({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: 256,
-    messages: [{ role: 'user', content: 'hello' }],
-  })
-  assert.equal(body.thinking?.type, 'disabled')
-  assert.equal(body.output_config, undefined)
-  assert.equal(body.context_management, undefined)
-})
-
-test('prepareCliHopBody drops caller context_management on Haiku (thinking pinned off)', () => {
-  // Claude Code 的 Haiku 旁路请求会带 clear_thinking。cli-hop 把 Haiku thinking 固定为 disabled
-  // 且跳过 beta 清洗，所以必须在这里删掉该字段，否则上游会杀掉 CLI。
+test('prepareCliHopBody leaves Haiku thinking and context management untouched', () => {
   const body = prepareCliHopBody({
     model: 'claude-haiku-4-5-20251001',
     max_tokens: 512,
+    thinking: { type: 'adaptive', display: 'omitted' },
     context_management: { edits: [{ type: 'clear_thinking_20251015' }] },
     messages: [{ role: 'user', content: 'hi' }],
   })
-  assert.equal(body.thinking?.type, 'disabled')
-  assert.equal(body.context_management, undefined)
-})
-
-test('prepareCliHopBody disables Haiku adaptive thinking', () => {
-  const body = prepareCliHopBody({
-    model: 'claude-haiku-4-5',
-    max_tokens: 256,
-    thinking: { type: 'adaptive', display: 'omitted' },
-    messages: [{ role: 'user', content: 'hello' }],
-  })
-  assert.equal(body.thinking.type, 'disabled')
+  assert.equal(body.thinking.type, 'adaptive')
+  assert.deepEqual(body.context_management, { edits: [{ type: 'clear_thinking_20251015' }] })
+  assert.equal(body.output_config, undefined)
 })
 
 function withoutMessageCache(body) {
@@ -358,7 +336,7 @@ function messageMarkers(body) {
   return hits
 }
 
-test('cli-hop drops caller tool markers and restamps the last user message', () => {
+test('cli-hop drops caller system/tools markers and restamps last plus penultimate user', () => {
   const body = prepareCliHopBody(
     {
       model: 'claude-sonnet-5',
@@ -377,9 +355,8 @@ test('cli-hop drops caller tool markers and restamps the last user message', () 
   )
   assert.equal(body.cache_control, undefined)
   assert.equal(body.tools[0].cache_control, undefined)
-  assert.equal(body.system.length, 1)
-  assert.equal(body.system[0].text, 'caller')
-  assert.equal(body.system[0].cache_control, undefined)
+  assert.equal(body.system[0].text, CRS_OFFICIAL_CLI_SYSTEM)
+  assert.deepEqual(body.system[0].cache_control, { type: 'ephemeral', ttl: '5m' })
   assert.deepEqual(messageMarkers(body), [
     { index: 0, blockIndex: 0, type: 'text', ttl: '5m' },
     { index: 2, blockIndex: 0, type: 'text', ttl: '5m' },
@@ -538,7 +515,7 @@ test('sonnet-5 lift keeps one context-budget reminder so the system tail stays s
   const renderedFirst = persona(first)
   const renderedSecond = persona(second)
   assert.deepEqual(renderedSecond.system, renderedFirst.system)
-  assert.equal(JSON.stringify(renderedSecond.system).match(/<total_tokens>/g)?.length, 2)
+  assert.equal(JSON.stringify(renderedSecond.system).includes('14928642'), false)
 })
 
 test('a later budget drop leaves a mixed system-reminder wrapper intact', () => {
@@ -555,7 +532,7 @@ test('a later budget drop leaves a mixed system-reminder wrapper intact', () => 
   assert.doesNotMatch(joined, /<total_tokens>1 tokens left<\/total_tokens>/)
 })
 
-test('cli-hop makes Opus 5.5 acceptable to Claude Code 2.1.280', () => {
+test('cli-hop leaves Opus model policy for cli-node', () => {
   const body = prepareCliHopBody({
     model: 'claude-opus-5.5',
     thinking: { type: 'enabled', budget_tokens: 8000, display: 'summarized' },
@@ -567,28 +544,10 @@ test('cli-hop makes Opus 5.5 acceptable to Claude Code 2.1.280', () => {
     ],
     messages: [{ role: 'user', content: 'hi' }],
   })
-  assert.equal(body.model, 'claude-opus-5-5')
-  assert.deepEqual(body.thinking, { type: 'adaptive', display: 'summarized' })
-  assert.equal(body.thinking.budget_tokens, undefined)
+  assert.equal(body.model, 'claude-opus-5.5')
+  assert.deepEqual(body.thinking, { type: 'enabled', budget_tokens: 8000, display: 'summarized' })
   assert.equal(body.output_config.effort, 'high')
-  assert.deepEqual(body.tool_choice, { type: 'auto' })
-  assert.equal(body.tools.find((tool) => tool.name === 'get_weather').strict, true)
-  assert.equal(body.tools.find((tool) => tool.name === 'computer').type, 'computer_toolset_20260801')
-
-  const filled = prepareCliHopBody({
-    model: 'claude-opus-5-5',
-    thinking: { type: 'disabled' },
-    messages: [{ role: 'user', content: 'hi' }],
-  })
-  assert.equal(filled.thinking.type, 'adaptive')
-  assert.equal(filled.thinking.budget_tokens, undefined)
-  assert.equal(filled.output_config.effort, 'medium')
-
-  const opus5 = prepareCliHopBody({
-    model: 'claude-opus-5',
-    thinking: { type: 'disabled' },
-    messages: [{ role: 'user', content: 'hi' }],
-  })
-  assert.equal(opus5.thinking.type, 'disabled')
-  assert.equal(opus5.output_config.effort, 'high')
+  assert.deepEqual(body.tool_choice, { type: 'tool', name: 'get_weather' })
+  assert.equal(body.tools.find((tool) => tool.name === 'get_weather').strict, undefined)
+  assert.equal(body.tools.find((tool) => tool.name === 'computer').type, 'computer_20251124')
 })

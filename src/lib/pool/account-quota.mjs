@@ -25,6 +25,7 @@ import {
   parseResetMs,
   wipeElapsedHeaderWindows,
 } from './quota-window.mjs'
+import { rollWindowHistory } from './window-history.mjs'
 import { accountTierKey, isNearLimit, normalizeTiers, resolveTierPolicy } from './quota-tiers.mjs'
 import { resolvePolicyModelId } from '../protocol/model-policy.mjs'
 import { SessionLimitRegistry } from './session-limit.mjs'
@@ -117,6 +118,16 @@ export class AccountQuota {
         sessionWindowStatus: w5.status || null,
       })
     } catch {}
+  }
+
+  /** Archive the window that just rolled over; live headers win over the official probe, as in `_writeSessionWindow`. */
+  _rollWindowHistory(acc) {
+    if (!acc?.unified) return
+    const read = (key) => {
+      const extra = headerWindow(acc.unified, key)
+      return extra.utilization != null && extra.reset ? extra : officialWindow(acc.unified, key)
+    }
+    acc.window_history = rollWindowHistory(acc.window_history, { '5h': read('5h'), '7d': read('7d') })
   }
 
   ensure(account) {
@@ -262,6 +273,7 @@ export class AccountQuota {
       })
     }
 
+    this._rollWindowHistory(acc)
     const saved = this.repo.save(acc)
     this._writeSessionWindow(saved)
     if (sampled) {
@@ -434,6 +446,7 @@ export class AccountQuota {
       healOfficialOverwriteExtra(acc, accountId, this.repo)
       clearHeaderExhaustIfOfficialOpen(acc)
     }
+    this._rollWindowHistory(acc)
     const saved = this.repo.save(acc)
     this._writeSessionWindow(saved)
     if (usageOk) {
@@ -503,6 +516,7 @@ export class AccountQuota {
       tokens_out: usageBody?.output_tokens ?? null,
     })
 
+    this._rollWindowHistory(acc)
     return this.repo.save(acc)
   }
 
@@ -551,8 +565,9 @@ export class AccountQuota {
     for (const vm of vms || []) this.setVmQuotaOverride(vm?.id, vm?.quota_override || null)
   }
 
-  canAccept(accountId, { tier = null, requestRisk = null, quotaRequest = null } = {}) {
-    const acc = this.ensure({ account_id: accountId })
+  canAccept(accountId, { tier = null, requestRisk = null, quotaRequest = null, account = undefined } = {}) {
+    const acc = account === undefined ? this.ensure({ account_id: accountId }) : account
+    if (!acc) return { ok: false, reason: 'account_missing' }
     const policy = this.policyFor(acc, { tier })
     const ratio = Number(policy.limit_5h ?? policy.safety_ratio ?? this.config.safety_ratio ?? 0.85)
     const weeklyRatio = Number(
@@ -576,7 +591,7 @@ export class AccountQuota {
     if (quotaConfig.block_on_5h && headerHardBlocked(acc.unified, '5h')) {
       const h5 = headerWindow(acc.unified, '5h')
       acc.last_blocked = { at: new Date().toISOString(), window: '5h', status: h5.status, source: 'headers' }
-      this.repo.save(acc)
+      if (account === undefined) this.repo.save(acc)
       return {
         ok: false,
         reason: 'quota_5h_cli',
@@ -590,7 +605,7 @@ export class AccountQuota {
     if (quotaConfig.block_on_7d && headerHardBlocked(acc.unified, '7d')) {
       const h7 = headerWindow(acc.unified, '7d')
       acc.last_blocked = { at: new Date().toISOString(), window: '7d', status: h7.status, source: 'headers' }
-      this.repo.save(acc)
+      if (account === undefined) this.repo.save(acc)
       return {
         ok: false,
         reason: 'quota_7d_cli',
@@ -611,7 +626,7 @@ export class AccountQuota {
 
     if (z5 === GATE_GATED) {
       acc.last_blocked = { at: new Date().toISOString(), window: '5h', utilization: u5, status: w5.status }
-      this.repo.save(acc)
+      if (account === undefined) this.repo.save(acc)
       return {
         ok: false,
         reason: 'quota_5h_safety',
@@ -629,7 +644,7 @@ export class AccountQuota {
 
     if (z7 === GATE_GATED) {
       acc.last_blocked = { at: new Date().toISOString(), window: '7d', utilization: u7, status: w7.status }
-      this.repo.save(acc)
+      if (account === undefined) this.repo.save(acc)
       return {
         ok: false,
         reason: 'quota_7d_safety',
@@ -711,17 +726,21 @@ export class AccountQuota {
     return { ok: true, warn_5h: u5 >= warnRatio, warn_7d: u7 >= Math.min(warnRatio, weeklyRatio) }
   }
   tryAcquire(accountId, opts = {}) {
+    const acc = opts.account === undefined ? this.ensure({ account_id: accountId }) : opts.account
+    if (!acc) return { ok: false, reason: 'account_missing' }
     if (!opts.skipGate) {
-      const gate = this.canAccept(accountId, opts)
-      if (!gate.ok) return gate
+      const gate = this.canAccept(accountId, { ...opts, account: acc })
+      if (!gate.ok) {
+        if (acc.last_blocked) this.repo.save(acc)
+        return gate
+      }
     }
-    const acc = this.ensure({ account_id: accountId })
     const inflight = this.inflight.get(accountId) || 0
     const limit = this.limitFor(acc, this.policyFor(acc, { tier: opts.tier }))
     if (inflight >= limit) {
       return { ok: false, reason: 'concurrency_limit', detail: { inflight, max: limit, source: 'quota-reservation' } }
     }
-    const inBand = this._drainingNow(accountId, { tier: opts.tier })
+    const inBand = this.gateZoneOf(accountId, { tier: opts.tier, account: acc }) === GATE_DRAINING
     const stack = this.reservationBand.get(accountId) || []
     stack.push(inBand)
     this.reservationBand.set(accountId, stack)
@@ -731,8 +750,8 @@ export class AccountQuota {
   }
 
   /** sub2api 7d_oi: Fable-only window. Does not unschedulable the account. */
-  fableWindowLimited(accountId, now = Date.now()) {
-    const oi = this.repo.get(accountId)?.unified?.['7d_oi']
+  fableWindowLimited(accountId, now = Date.now(), account = undefined) {
+    const oi = (account === undefined ? this.repo.get(accountId) : account)?.unified?.['7d_oi']
     if (!oi) return false
     const status = String(oi.status || '').toLowerCase()
     if (status !== 'rejected' && status !== 'rate_limited') return false
@@ -741,16 +760,16 @@ export class AccountQuota {
     return true
   }
 
-  fableWindowResetAt(accountId) {
-    const reset = this.repo.get(accountId)?.unified?.['7d_oi']?.reset
+  fableWindowResetAt(accountId, account = undefined) {
+    const reset = (account === undefined ? this.repo.get(accountId) : account)?.unified?.['7d_oi']?.reset
     if (!reset) return null
     const ms = parseResetMs(reset)
     return Number.isFinite(ms) ? ms : null
   }
 
   /** Experimental 50/50 weekly split. Off unless quota.weekly_split.enabled (or the VM override). */
-  weeklySplitOf(accountId) {
-    const acc = this.repo.get(accountId)
+  weeklySplitOf(accountId, account = undefined) {
+    const acc = account === undefined ? this.repo.get(accountId) : account
     const cfg = weeklySplitConfig(this.quotaConfigFor(acc))
     const u = acc?.unified || {}
     return computeWeeklySplit({
@@ -763,8 +782,8 @@ export class AccountQuota {
     })
   }
 
-  weeklySplitResetAt(accountId, kind = 'regular') {
-    const acc = this.repo.get(accountId)
+  weeklySplitResetAt(accountId, kind = 'regular', account = undefined) {
+    const acc = account === undefined ? this.repo.get(accountId) : account
     const key = kind === 'fable' ? '7d_oi' : '7d'
     const reset = acc?.unified?.[key]?.reset
     if (!reset) return null
@@ -806,8 +825,8 @@ export class AccountQuota {
    * The stricter 5h/7d gate zone for this account (see quota-gate.mjs), with
    * the block switches applied. Used by the seat planner to place new devices.
    */
-  gateZoneOf(accountId, { tier = null } = {}) {
-    const acc = this.repo.get(accountId) || this.ensure({ account_id: accountId })
+  gateZoneOf(accountId, { tier = null, account = undefined } = {}) {
+    const acc = account === undefined ? this.ensure({ account_id: accountId }) : account
     const policy = this.policyFor(acc, { tier })
     const quotaConfig = this.quotaConfigFor(acc)
     const gate = quotaGateOf(quotaConfig)
@@ -1012,6 +1031,7 @@ export class AccountQuota {
             '7d': listed.utilization_7d != null || listed.status_7d ? listed['7d'] : official['7d'],
           },
           last_blocked: a.last_blocked,
+          window_history: a.window_history || null,
           recent_allocations: this.repo.recentAllocations(a.account_id, 5),
         }
       }),

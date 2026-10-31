@@ -10,7 +10,12 @@ import {
   restartRustKernel,
   writeKernelConfig,
 } from '../transport/rust-kernel-supervisor.mjs'
-import { ensureCodexKernel, stopCodexKernel, writeCodexKernelConfig } from '../transport/codex-kernel-supervisor.mjs'
+import {
+  ensureCodexKernel,
+  stopCodexKernel,
+  stopCodexKernelAndWait,
+  writeCodexKernelConfig,
+} from '../transport/codex-kernel-supervisor.mjs'
 import { runtimeKind, isKvmRuntime } from './runtime-kind.mjs'
 import { getVm, listVms, isCodexVm, persistVmRuntime } from './vm-registry.mjs'
 import { resolveInferenceEngine } from './slot-engine.mjs'
@@ -77,10 +82,27 @@ export async function reloadSlot(vm, projectRoot, opts = {}) {
 }
 
 export async function reloadSlotReady(vm, projectRoot, opts = {}) {
-  const boot = await reloadSlot(vm, projectRoot, opts)
+  const boot = await (opts.ops?.reloadSlot || reloadSlot)(vm, projectRoot, opts)
   if (!boot?.ok) return boot
   persistVmRuntime(projectRoot, vm.id, boot.runtime)
-  return attachInferenceRuntime(boot, vm, projectRoot, opts)
+  if (isCodexVm(vm)) {
+    // The GPT container holds identity/egress; the actual inference process is
+    // in the control plane. Reusing its health would keep the old proxy/client.
+    const stop = opts.ops?.stopCodexKernelAndWait || stopCodexKernelAndWait
+    const stopped = await stop(slotExec(projectRoot, vm))
+    if (!stopped.ok) {
+      return {
+        ok: false,
+        code: 'codex_kernel_reload_failed',
+        error: `Codex kernel reload failed (${stopped.reason || 'stop_failed'})`,
+      }
+    }
+  }
+  const attached = await attachInferenceRuntime(boot, vm, projectRoot, opts)
+  if (isCodexVm(vm) && attached.rust?.ok === false) {
+    return { ...attached, ok: false, code: attached.rust.code, error: attached.rust.error }
+  }
+  return attached
 }
 
 /**
@@ -133,10 +155,10 @@ export async function ensureSlotInferenceRuntime(vm, projectRoot, opts = {}) {
     }
     return { ok: true, engine: 'codex', kernel }
   }
-  if (!eager) return { ok: true, skipped: true, reason: 'eager_start_off' }
+  if (!eager && opts.allowMissingCredential !== true) return { ok: true, skipped: true, reason: 'eager_start_off' }
   const engine = resolveInferenceEngine(vm, routing)
   if (engine !== 'rust') return { ok: true, skipped: true, reason: 'engine_not_rust', engine }
-  if (!slotHasCredential(vm, projectRoot)) {
+  if (opts.allowMissingCredential !== true && !slotHasCredential(vm, projectRoot)) {
     return { ok: true, skipped: true, reason: 'no_credential', engine: 'rust' }
   }
   // A baked slot image ships kernel and CLIs; there is no .kin to materialize or kernel to mount.
@@ -172,7 +194,10 @@ export async function ensureSlotInferenceRuntime(vm, projectRoot, opts = {}) {
 
   const exec = slotExec(projectRoot, vm)
   const start = opts.ops?.ensureRustKernel || ensureRustKernel
-  const rust = await start(exec, { timeoutMs: opts.timeoutMs })
+  const rust = await start(exec, {
+    timeoutMs: opts.timeoutMs,
+    allowMissingCredential: opts.allowMissingCredential === true,
+  })
   if (!rust?.ok) {
     return {
       ok: false,
@@ -202,6 +227,7 @@ export function slotExec(projectRoot, vm) {
     accountId: vm.claude?.account_uuid || vm.id,
     vm,
     vmPath: path.join(projectRoot, 'vms', `${vm.id}.json`),
+    projectRoot,
     homeDir: path.join(projectRoot, 'vms', vm.id, 'cli-home'),
     timezone: vm.timezone || 'UTC',
     locale: vm.locale || 'en_US.UTF-8',

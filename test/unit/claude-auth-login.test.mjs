@@ -15,6 +15,7 @@ import {
 } from '../../src/lib/oauth/claude-auth-login.mjs'
 import { KVM_GUEST_EXEC } from '../../src/lib/vm/slot-exec.mjs'
 import { FULL_OAUTH_SCOPE } from '../../src/lib/oauth/oauth-contract.mjs'
+import { prepareSlotOAuth } from '../../src/lib/oauth/guest-oauth-helper.mjs'
 
 test('extractAuthLoginUrl reads the official manual CAI link', () => {
   const url =
@@ -112,16 +113,32 @@ test('assertAuthLoginReady refuses a missing container and a missing cli-node', 
 
 test('a live login session is not reused after the container stops or cli-node disappears', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-auth-login-reuse-'))
-  const vm = { id: 'vm-01' }
+  const vm = { id: 'vm-01', runtime: { type: 'docker' }, proxy: { id: 'px-local' } }
   const running = () => ({ running: true })
   const stopped = () => ({ running: false })
+  const prepare = (options) =>
+    prepareSlotOAuth({
+      ...options,
+      startReady: async () => ({
+        ok: true,
+        rust_ok: true,
+        rust: { ok: true, health: { vm_telemetry: true, telemetry_ready: true } },
+      }),
+    })
   try {
     const home = path.join(root, 'vms', 'vm-01', 'cli-home', '.kin')
     fs.mkdirSync(home, { recursive: true })
     const cli = path.join(home, 'cli-node')
     fs.writeFileSync(cli, '')
+    fs.writeFileSync(path.join(root, 'vms', 'vm-01.json'), JSON.stringify(vm))
     const dir = authLoginSessionDir(root, 'vm-01')
     fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(
+      path.join(root, 'vms', 'vm-01', 'run', 'kernel.json'),
+      JSON.stringify({
+        credential_path: '/home/kincli/.claude/credentials.json',
+      }),
+    )
     fs.writeFileSync(path.join(dir, 'pty.pid'), `${process.pid}\n`)
     fs.writeFileSync(
       path.join(dir, 'status.json'),
@@ -133,16 +150,16 @@ test('a live login session is not reused after the container stops or cli-node d
         updated_at: Date.now(),
       }),
     )
-    const reused = await startClaudeAuthLoginSession({ vm, projectRoot: root, inspect: running })
+    const reused = await startClaudeAuthLoginSession({ vm, projectRoot: root, inspect: running, prepare })
     assert.equal(reused.reused, true)
     assert.equal(reused.session_id, 'live-login')
     await assert.rejects(
-      () => startClaudeAuthLoginSession({ vm, projectRoot: root, inspect: stopped }),
+      () => startClaudeAuthLoginSession({ vm, projectRoot: root, inspect: stopped, prepare }),
       (err) => err.code === 'container_not_ready',
     )
     fs.rmSync(cli)
     await assert.rejects(
-      () => startClaudeAuthLoginSession({ vm, projectRoot: root, inspect: running }),
+      () => startClaudeAuthLoginSession({ vm, projectRoot: root, inspect: running, prepare }),
       (err) => err.code === 'cli_node_missing',
     )
   } finally {

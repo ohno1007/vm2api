@@ -50,6 +50,27 @@ test('pool membership is shared by keys and applied on the next read', () => {
   }
 })
 
+test('deleting a slot or pruning removes it from pool membership', () => {
+  const { dir, store, repo } = open()
+  try {
+    const pool = createVmPool(repo, { name: 'P1', vm_ids: ['vm-01', 'vm-02'] }, vms)
+    const other = createVmPool(repo, { name: 'P2', vm_ids: ['vm-03'] }, vms)
+    assert.equal(repo.removeVm('vm-01'), 1)
+    assert.deepEqual(repo.get(pool.id).vm_ids, ['vm-02'])
+    assert.deepEqual(repo.get(other.id).vm_ids, ['vm-03'])
+    assert.equal(repo.removeVm('vm-01'), 0)
+    // A membership left behind by a slot deleted outside the panel.
+    repo.db
+      .prepare('INSERT INTO vm_pool_members (pool_id, vm_id, created_at) VALUES (?, ?, ?)')
+      .run(pool.id, 'vm-gone', new Date().toISOString())
+    assert.deepEqual(repo.pruneUnknown(['vm-02', 'vm-03']), ['vm-gone'])
+    assert.deepEqual(repo.get(pool.id).vm_ids, ['vm-02'])
+    assert.deepEqual(repo.get(other.id).vm_ids, ['vm-03'])
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('an empty pool stays empty instead of meaning every VM', () => {
   const { dir, store, repo } = open()
   try {

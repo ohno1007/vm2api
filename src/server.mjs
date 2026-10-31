@@ -30,7 +30,6 @@ import {
 import { createKernelWatchdog, normalizeKernelWatchdogConfig } from './lib/transport/kernel-watchdog.mjs'
 import { ensureSlotSubscriptionType } from './lib/oauth/oauth-credentials.mjs'
 import { createCliNodeGuard } from './lib/vm/cli-node-guard.mjs'
-import { ensureTelemetrySidecar } from './lib/vm/slot-process-status.mjs'
 
 import { createSlotBridgeHealer, powerOnSlot, reviveDownSlots } from './lib/vm/slot-recovery.mjs'
 import { createUsageProbeMonitor, normalizeUsageProbeConfig } from './lib/oauth/usage-probe-monitor.mjs'
@@ -38,11 +37,11 @@ import { createCatalogMonitor } from './lib/admin/catalog-monitor.mjs'
 import { normalizeOfficialCcConfig } from './lib/oauth/official-cc-bootstrap.mjs'
 import { invalidateLiveCredentialCache } from './lib/admin/panel-live-credentials.mjs'
 import { normalizeHealthProbeConfig, createHealthProbeMonitor, HEALTH_REAL_HEADER } from './lib/admin/health-probe.mjs'
-import { normalizeNotifyConfig, createNotifyMonitor, dispatchNotify } from './lib/admin/notify.mjs'
+import { normalizeNotifyConfig, createNotifyMonitor } from './lib/admin/notify.mjs'
+import { snapshotVmConnectivity } from './lib/admin/vm-connectivity.mjs'
 import { resolveVmTestBaseUrl, runVmTestChat } from './lib/admin/vm-test-chat.mjs'
 import { VmTestScheduleRunner } from './lib/admin/vm-test-schedule.mjs'
 import { StickyRouter } from './lib/pool/sticky-router.mjs'
-import { setManualScheduleWins } from './lib/pool/schedule-policy.mjs'
 import { AccountQuota } from './lib/pool/account-quota.mjs'
 import { normalizeTiers } from './lib/pool/quota-tiers.mjs'
 import { ApiKeyStore } from './lib/admin/api-keys.mjs'
@@ -60,11 +59,13 @@ import {
   listVms,
   getVm,
   getActiveVmId,
-  setVmSchedulable,
+  setScheduleHold,
+  clearScheduleHold,
   isCodexVm,
   syncCodexQuotaSchedule,
 } from './lib/vm/vm-registry.mjs'
 import { makeError, ErrorType, ErrorCode } from './lib/core/errors.mjs'
+import { HOLD_PROXY } from './lib/pool/schedule-state.mjs'
 import * as panel from './lib/admin/panel-api.mjs'
 import { ProxyPool } from './lib/vm/proxy-pool.mjs'
 import { ensureProxyEgress, proxyEgressReady } from './lib/vm/egress.mjs'
@@ -72,6 +73,8 @@ import { syncIpv6ProxyEgress } from './lib/vm/proxy-policy-runtime.mjs'
 import { GATEWAY_CAPABILITIES } from './lib/vm/execution-context.mjs'
 import { isTelemetryPath, telemetryInterceptResponse } from './lib/identity/telemetry-rewrite.mjs'
 import { openDatabase, closeDatabase } from './lib/db/database.mjs'
+import { JevUsageRepo } from './lib/db/repos/jev-usage-repo.mjs'
+import { installJevUsageRecorder } from './lib/protocol/jev-usage.mjs'
 import { runLegacyImport } from './lib/db/legacy-import.mjs'
 import { initVmDbSync, stopVmWatch } from './lib/vm/vm-db-sync.mjs'
 import { BackupService } from './lib/admin/backup-service.mjs'
@@ -83,7 +86,7 @@ import { ClusterError } from './lib/cluster/ssh-link.mjs'
 import { nodeEgressProxyUrl, startNodeEgressSocks } from './lib/cluster/node-egress-socks.mjs'
 import { createSlotShell } from './lib/vm/slot-shell.mjs'
 import { vmLockBusy } from './lib/vm/vm-file.mjs'
-import { refreshSlotGuestBinDir } from './lib/vm/vm-runtime.mjs'
+import { refreshSlotGuestBinDir, syncLocalSlotRestartPolicies } from './lib/vm/vm-runtime.mjs'
 
 import {
   classifyCredentialRefresh,
@@ -144,6 +147,8 @@ const allowRate = createRateLimiter({
 // --- Persistent store (SQLite, sub2api-inspired) ---
 const dataDir = cfg.paths.data || path.join(cfg.paths.root, 'data')
 openDatabase({ dataDir })
+const jevUsageRepo = new JevUsageRepo()
+installJevUsageRecorder((event) => jevUsageRepo.record(event))
 try {
   loadModelPolicy()
 } catch (e) {
@@ -280,7 +285,6 @@ const {
 
 routingConfig = loadRoutingConfig()
 migrateLegacyOpenAIPolicies(routingConfig)
-setManualScheduleWins(routingConfig.pool?.manual_schedule_wins)
 if (routingConfig.official_cc) {
   routingConfig.official_cc = normalizeOfficialCcConfig(routingConfig.official_cc)
 }
@@ -359,16 +363,16 @@ proxyPool = new ProxyPool({
     return { ok: false, error: `node_link_${state}` }
   },
   onDisableVm: (vmId, reason, proxyId) => {
-    setVmSchedulable(cfg.paths.project, vmId, false, `${reason}|proxy=${proxyId}`)
+    setScheduleHold(cfg.paths.project, vmId, HOLD_PROXY, { tag: proxyId, message: reason })
   },
   onDisconnectVm: (vmId, reason, proxyId) => {
-    setVmSchedulable(cfg.paths.project, vmId, false, `${reason}|proxy=${proxyId}`)
+    setScheduleHold(cfg.paths.project, vmId, HOLD_PROXY, { tag: proxyId, message: reason })
   },
+  // Lifts only the hold this proxy put on the slot (受限); 调度关 / 不可调度 stay.
   onEnableVm: (vmId, _reason, proxyId) => {
-    const vm = getVm(cfg.paths.project, vmId)
-    const why = String(vm?.schedule_disabled_reason || '')
-    if (!why.includes(`proxy=${proxyId}`) && !/egress_down|proxy_probe_failed/.test(why)) return
-    setVmSchedulable(cfg.paths.project, vmId, true)
+    const hold = getVm(cfg.paths.project, vmId)?.schedule_hold
+    if (hold?.reason !== HOLD_PROXY) return
+    clearScheduleHold(cfg.paths.project, vmId, HOLD_PROXY, { tag: hold.detail?.tag == null ? null : proxyId })
   },
   egressCheck: (proxy) => proxyEgressReady(proxy, cfg.paths.project),
   repairEgress: (proxy) => ensureProxyEgress(cfg.paths.project, proxy),
@@ -505,17 +509,8 @@ kernelWatchdog = createKernelWatchdog({
   listTargets: () => listVms(cfg.paths.project),
   getRouting: () => routingConfig,
   homeDirFor: (vm) => path.join(cfg.paths.project, 'vms', vm.id, 'cli-home'),
-  ensureTelemetry: (vm) => ensureTelemetrySidecar({ projectRoot: cfg.paths.project, vm }),
   revive: (vm) => bootSlot(vm.id),
   healBridges: createSlotBridgeHealer({ projectRoot: cfg.paths.project }),
-  onFault: (vm, reason) => {
-    const title = `槽内核故障 ${vm.id}`
-    dispatchNotify(routingConfig.notify, {
-      title,
-      text: `【KIN】${title}\n\n${reason}\n已停止调度该槽；内核恢复健康后自动恢复调度。`,
-      subject: `KIN · ${title}`,
-    }).catch((error) => console.warn('[kernel-watchdog] notify failed', error?.message || error))
-  },
 })
 
 usageProbeMonitor = createUsageProbeMonitor({
@@ -548,6 +543,7 @@ catalogMonitor = createCatalogMonitor({
   log: (event) => console.log(JSON.stringify(event)),
 })
 notifyMonitor = createNotifyMonitor({
+  vmSnapshot: () => snapshotVmConnectivity(listVms(cfg.paths.project)),
   config: routingConfig.notify,
   baseUrl: cfg.base_url,
   snapshot: () =>
@@ -579,7 +575,6 @@ backupService.onRestored((db) => {
 
   routingConfig = loadRoutingConfig()
   migrateLegacyOpenAIPolicies(routingConfig)
-  setManualScheduleWins(routingConfig.pool?.manual_schedule_wins)
   if (routingConfig.official_cc) {
     routingConfig.official_cc = normalizeOfficialCcConfig(routingConfig.official_cc)
   }
@@ -1253,6 +1248,7 @@ let _shuttingDown = false
 function shutdown(signal) {
   if (_shuttingDown) return
   _shuttingDown = true
+  installJevUsageRecorder(null)
   console.log(`[shutdown] ${signal} — closing`)
   try {
     vmTestSchedule.stop()
@@ -1307,6 +1303,9 @@ function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'))
 process.on('SIGINT', () => shutdown('SIGINT'))
 
+if (process.env.KIN_CRS_MOCK !== '1') {
+  syncLocalSlotRestartPolicies(listVms(cfg.paths.project))
+}
 await bootApiKernel(cfg)
 
 server.listen(cfg.port, cfg.host, () => {
@@ -1331,7 +1330,7 @@ server.listen(cfg.port, cfg.host, () => {
   } catch (e) {
     console.warn('[kernel-watchdog] start failed', e?.message || e)
   }
-  // Boot fills what Docker's restart policy missed (removed or exited slot containers); off with the watchdog.
+  // Proxy slots do not auto-start with Docker: boot restores egress before starting recorded-running slots.
   if (process.env.KIN_CRS_MOCK !== '1' && normalizeKernelWatchdogConfig(routingConfig.kernel_watchdog).enabled) {
     reviveDownSlots({ vms: listVms(cfg.paths.project), powerOn: bootSlot, watchdog: kernelWatchdog }).catch((e) =>
       console.warn('[slot-revive] boot pass failed', e?.message || e),

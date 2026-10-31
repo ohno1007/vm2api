@@ -21,8 +21,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { isDbOpen, getDb } from '../db/database.mjs'
 import { VmsRepo } from '../db/repos/vms-repo.mjs'
+import { VmPoolsRepo } from '../db/repos/vm-pools-repo.mjs'
 import { setVmWriteHook, atomicWriteJson, isVmRecordFile } from './vm-file.mjs'
-import { reclaimAssignedVms, repairSlotSmbios, repairVmProxyCliEnabled } from './vm-registry.mjs'
+import { migrateScheduleFields, reclaimAssignedVms, repairSlotSmbios, repairVmProxyCliEnabled } from './vm-registry.mjs'
 
 let _repo = null
 let _watcher = null
@@ -67,7 +68,24 @@ export function syncVmFile(filePath) {
 export function removeVmFromDb(id) {
   const r = repo()
   if (!r || !id) return false
-  return r.remove(id)
+  const removed = r.remove(id)
+  // A deleted slot must not linger in named pools: the panel cannot render or
+  // uncheck an unknown id, and every save of that pool used to fail.
+  if (isDbOpen()) {
+    try {
+      new VmPoolsRepo(getDb()).removeVm(id)
+    } catch {}
+  }
+  return removed
+}
+
+function pruneVmPools(knownIds) {
+  if (!isDbOpen()) return []
+  try {
+    return new VmPoolsRepo(getDb()).pruneUnknown(knownIds)
+  } catch {
+    return []
+  }
 }
 
 /** Forget settings.active_vm so startup reconcile does not rewrite active.json. */
@@ -119,6 +137,12 @@ export function reconcileVms(projectRoot) {
       out.rebuilt += 1
     } catch {}
   }
+
+  // Pool memberships for slots that exist nowhere any more (file deleted outside
+  // the panel, or DB row gone). Rebuilt rows above count as alive.
+  const known = new Set(seen)
+  for (const row of r.list()) if (row?.id && row.vm) known.add(row.id)
+  out.pruned_pool_members = pruneVmPools(known)
 
   // active.json ↔ settings.active_vm
   const activeFile = path.join(dir, 'active.json')
@@ -176,6 +200,18 @@ export function initVmDbSync(projectRoot, { watch = true } = {}) {
     result.smbios_repaired = repairSlotSmbios(projectRoot).length
   } catch {
     result.smbios_repaired = 0
+  }
+  try {
+    const migrated = migrateScheduleFields(projectRoot)
+    result.schedule_migrated = migrated.length
+    for (const row of migrated) {
+      console.warn(
+        `[vm] schedule state ${row.id}: ${row.from || '-'} -> ${row.state}${row.reason ? `:${row.reason}` : ''}`,
+      )
+    }
+  } catch (error) {
+    console.warn(`[vm] schedule state migration failed: ${error?.message || error}`)
+    result.schedule_migrated = 0
   }
   if (watch) startVmWatch(projectRoot)
   return result

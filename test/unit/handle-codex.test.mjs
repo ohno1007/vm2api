@@ -385,7 +385,7 @@ test('GPT on anthropic.messages converts and pins a GPT slot', async () => {
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-test('nested Responses cached_tokens reaches the request log cache column', async () => {
+test('Codex merges SSE cache read/write details with totals without adding reasoning twice', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-cache-'))
   writeGptVm(root, 'vm-gpt-a')
   const res = {
@@ -420,21 +420,52 @@ test('nested Responses cached_tokens reaches the request log cache column', asyn
       writeCodexKernelConfig() {},
       ensureCodexKernel: async () => ({ ok: true }),
       streamCodexKernel: async ({ onEvent }) => {
-        await onEvent('data: {"type":"response.completed"}')
+        await onEvent(
+          'data: {"type":"response.completed","response":{"usage":{"input_tokens_details":{"cached_tokens":8,"cache_creation_tokens":4},"output_tokens_details":{"reasoning_tokens":6}}}}',
+        )
         return {
           ok: true,
           status: 200,
           terminalState: 'verified',
-          // merged trailer + SSE usage: totals flat, cache read nested
-          usage: { input_tokens: 120, output_tokens: 9, input_tokens_details: { cached_tokens: 8 } },
+          // The trailer reports only totals; cache details came from the SSE snapshot.
+          usage: { input_tokens: 120, output_tokens: 9 },
         }
       },
     },
   })
-  assert.equal(logBag.input_tokens, 112)
+  assert.equal(logBag.input_tokens, 108)
   assert.equal(logBag.output_tokens, 9)
   assert.equal(logBag.cache_read_tokens, 8)
+  assert.equal(logBag.cache_creation_tokens, 4)
+  assert.equal(logBag.usage.reasoning_tokens, 6)
   fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('Codex keeps already-disjoint cache counters instead of re-extracting inclusive usage', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-disjoint-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  writeGptVm(root, 'vm-gpt-a')
+  const logBag = {}
+  await handleCodexProtocol(
+    codexArgs(
+      root,
+      {
+        ensureCodexKernel: async () => ({ ok: true }),
+        streamCodexKernel: async () => ({
+          ok: true,
+          status: 200,
+          terminalState: 'verified',
+          body: { id: 'resp_disjoint', output: [] },
+          usage: { input_tokens: 108, output_tokens: 9, cache_read_input_tokens: 8, cache_creation_input_tokens: 4 },
+        }),
+      },
+      { logBag },
+    ),
+  )
+  assert.equal(logBag.input_tokens, 108)
+  assert.equal(logBag.output_tokens, 9)
+  assert.equal(logBag.cache_read_tokens, 8)
+  assert.equal(logBag.cache_creation_tokens, 4)
 })
 
 test('request log first_token_ms uses firstTokenAt minus injected ingress t0', async () => {
@@ -587,10 +618,62 @@ test('incomplete Responses stream still bills tokens from the completed event', 
   assert.equal(logBag.input_tokens, 35)
   assert.equal(logBag.output_tokens, 2)
   assert.equal(logBag.cache_read_tokens, 5)
-  assert.equal(logBag.usage.service_tier, 'priority')
+  // Nothing was sent, so the echoed tier does not pick the billing band; it is kept apart.
+  assert.equal(logBag.usage.service_tier, null)
+  assert.equal(logBag.upstream_service_tier, 'priority')
   assert.equal(logBag.error_code, undefined)
   assert.equal(logBag.final_state, 'verified')
   assert.equal(stats.errors, 0)
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('#777 fast bills at the sent priority tier and records the upstream default echo', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-tier-'))
+  writeGptVm(root, 'vm-gpt-a')
+  const res = {
+    headersSent: false,
+    write() {
+      this.headersSent = true
+    },
+    end() {
+      this.ended = true
+    },
+  }
+  const logBag = {}
+  const envelopes = []
+  await handleCodexProtocol({
+    req: { headers: {} },
+    res,
+    protocol: 'openai.responses',
+    ctx: { body: { model: 'gpt-6.1-sol', input: 'hi', stream: true, service_tier: 'fast' } },
+    inbound: { stream: true },
+    logBag,
+    stats: { errors: 0, requests: 0, by_route: {} },
+    json: (_res, status, body) => {
+      res.statusCode = status
+      res.body = body
+      return body
+    },
+    writeSSEHeaders() {
+      res.headersSent = true
+    },
+    routing: {},
+    projectRoot: root,
+    ops: {
+      writeCodexKernelConfig() {},
+      ensureCodexKernel: async () => ({ ok: true }),
+      streamCodexKernel: async ({ envelope, onEvent }) => {
+        envelopes.push(envelope)
+        await onEvent(
+          'data: {"type":"response.completed","response":{"service_tier":"DEFAULT","usage":{"input_tokens":10,"output_tokens":2}}}',
+        )
+        return { ok: true, status: 200, terminalState: 'verified' }
+      },
+    },
+  })
+  assert.equal(envelopes[0].body.service_tier, 'priority')
+  assert.equal(logBag.usage.service_tier, 'priority')
+  assert.equal(logBag.upstream_service_tier, 'default')
   fs.rmSync(root, { recursive: true, force: true })
 })
 
@@ -1433,4 +1516,125 @@ test('tool argument disagreement terminates the client stream instead of recordi
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('a freed GPT seat wakes only a waiter that can use that account', async () => {
+  const rt = await import('../../src/lib/pool/openai-account-runtime.mjs')
+  rt.resetOpenAIAccountRuntime()
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-targeted-wake-'))
+  const vmDir = path.join(root, 'vms')
+  for (const [id, model] of [
+    ['vm-gpt-a', 'gpt-a'],
+    ['vm-gpt-b', 'gpt-b'],
+  ]) {
+    writeGptVm(root, id)
+    const file = path.join(vmDir, `${id}.json`)
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+    fs.writeFileSync(file, JSON.stringify({ ...raw, policy: { maxConcurrency: 1, allowed_models: [model] } }))
+  }
+  const gates = []
+  const opened = []
+  for (let i = 0; i < 2; i++) gates.push(new Promise((resolve) => opened.push(resolve)))
+  let hops = 0
+  const ops = {
+    ensureCodexKernel: async () => ({ ok: true }),
+    streamCodexKernel: async ({ onEvent }) => {
+      const gate = gates[hops++]
+      if (gate) await gate
+      await onEvent('data: {"type":"response.completed"}')
+      return { ok: true, status: 200, terminalState: 'verified' }
+    },
+  }
+  const run = (model) => handleCodexProtocol(codexArgs(root, ops, { body: { model, input: 'hi', stream: false } }))
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 20))
+  const busyA = run('gpt-a')
+  await tick()
+  const busyB = run('gpt-b')
+  await tick()
+  assert.equal(hops, 2)
+  const waitersB = Array.from({ length: 10 }, () => run('gpt-b'))
+  await tick()
+  const waiterA = run('gpt-a')
+  await tick()
+  assert.equal(rt.openAIWaiterCount(), 11)
+  // Each selection round lists vms/ twice: quota sync, then the summarized pool.
+  const realReaddir = fs.readdirSync
+  let vmDirReads = 0
+  fs.readdirSync = function (dir, ...rest) {
+    if (dir === vmDir) vmDirReads++
+    return realReaddir.call(this, dir, ...rest)
+  }
+  try {
+    opened[0]()
+    assert.equal((await busyA).status, 200)
+    assert.equal((await waiterA).status, 200)
+  } finally {
+    fs.readdirSync = realReaddir
+  }
+  // One round for the gpt-a waiter; the ten gpt-b waiters ahead of it are not woken.
+  assert.equal(vmDirReads, 2)
+  assert.equal(rt.openAIWaiterCount(), 10)
+  opened[1]()
+  const results = await Promise.all([busyB, ...waitersB])
+  assert.deepEqual(
+    results.map((r) => r.status),
+    Array(11).fill(200),
+  )
+  assert.equal(hops, 13)
+  rt.resetOpenAIAccountRuntime()
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('a woken GPT waiter whose seat was taken re-parks first instead of waking the queue', async () => {
+  const rt = await import('../../src/lib/pool/openai-account-runtime.mjs')
+  rt.resetOpenAIAccountRuntime()
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-stolen-seat-'))
+  const vmDir = path.join(root, 'vms')
+  writeGptVm(root, 'vm-gpt-a')
+  const file = path.join(vmDir, 'vm-gpt-a.json')
+  const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+  fs.writeFileSync(file, JSON.stringify({ ...raw, policy: { maxConcurrency: 1 } }))
+  const order = []
+  const ops = {
+    ensureCodexKernel: async () => ({ ok: true }),
+    streamCodexKernel: async ({ onEvent }) => {
+      await onEvent('data: {"type":"response.completed"}')
+      return { ok: true, status: 200, terminalState: 'verified' }
+    },
+  }
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 20))
+  const held = rt.tryAcquireOpenAISlot('vm-gpt-a', { concurrency: 1 })
+  const waiters = []
+  for (let i = 0; i < 5; i++) {
+    waiters.push(handleCodexProtocol(codexArgs(root, ops)).then((r) => order.push(i) && r))
+    await tick()
+  }
+  assert.equal(rt.openAIWaiterCount(), 5)
+  const realReaddir = fs.readdirSync
+  let vmDirReads = 0
+  fs.readdirSync = function (dir, ...rest) {
+    if (dir === vmDir) vmDirReads++
+    return realReaddir.call(this, dir, ...rest)
+  }
+  let thief
+  try {
+    held.release()
+    thief = rt.tryAcquireOpenAISlot('vm-gpt-a', { concurrency: 1 })
+    assert.ok(thief)
+    await tick()
+  } finally {
+    fs.readdirSync = realReaddir
+  }
+  // Only the oldest waiter re-checks; the other four stay parked.
+  assert.equal(vmDirReads, 2)
+  assert.equal(rt.openAIWaiterCount(), 5)
+  thief.release()
+  const results = await Promise.all(waiters)
+  assert.deepEqual(
+    results.map((r) => r.status),
+    Array(5).fill(200),
+  )
+  assert.deepEqual(order, [0, 1, 2, 3, 4])
+  rt.resetOpenAIAccountRuntime()
+  fs.rmSync(root, { recursive: true, force: true })
 })

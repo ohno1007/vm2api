@@ -230,7 +230,7 @@ export function personaModeFromPreset(preset) {
   return null
 }
 
-/** Wrap CLI layout follows the resolved persona preset. zero stays zero; official / custom → identity. */
+/** zero stays zero. Other presets stay identity; the CLI preserves a 303-shaped system there. */
 export function resolveCliSystemLayout(vm, routing = {}) {
   const preset = resolveSlotPersonaPreset(vm, routing)
   if (preset === 'zero') return 'zero'

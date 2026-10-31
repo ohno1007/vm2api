@@ -29,7 +29,7 @@ const DEFAULT_UNIFIED = () => ({
   updated_at: null,
 })
 
-function rowToAccount(row) {
+export function rowToAccount(row) {
   if (!row) return null
   const extra = parse(row.extra, {}) || {}
   return {
@@ -55,6 +55,7 @@ function rowToAccount(row) {
     unified: extra.unified ?? DEFAULT_UNIFIED(),
     last_blocked: extra.last_blocked ?? null,
     last_cli_rate_limit: extra.last_cli_rate_limit ?? null,
+    window_history: extra.window_history ?? null,
     updated_at: row.updated_at,
   }
 }
@@ -64,6 +65,7 @@ function buildExtra(acc) {
     unified: acc.unified ?? null,
     last_blocked: acc.last_blocked ?? null,
     last_cli_rate_limit: acc.last_cli_rate_limit ?? null,
+    window_history: acc.window_history ?? null,
   })
 }
 

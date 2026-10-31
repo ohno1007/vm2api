@@ -6,11 +6,12 @@ import path from 'node:path'
 import { openDatabase, closeDatabase, getDb } from '../../src/lib/db/database.mjs'
 import { VmsRepo } from '../../src/lib/db/repos/vms-repo.mjs'
 import { UsersRepo } from '../../src/lib/db/repos/users-repo.mjs'
+import { VmPoolsRepo } from '../../src/lib/db/repos/vm-pools-repo.mjs'
 import { encryptString, decryptString, isEncrypted } from '../../src/lib/db/secure.mjs'
 import { initVmDbSync, stopVmWatch, syncVmFile, removeVmFromDb, reconcileVms } from '../../src/lib/vm/vm-db-sync.mjs'
 import { setVmWriteHook, atomicWriteJson } from '../../src/lib/vm/vm-file.mjs'
 import { persistOauthToVm } from '../../src/lib/oauth/oauth-credentials.mjs'
-import { setVmSchedulable, setActiveVm } from '../../src/lib/vm/vm-registry.mjs'
+import { clearScheduleHold, setVmSchedulable, setActiveVm } from '../../src/lib/vm/vm-registry.mjs'
 
 let project
 
@@ -148,10 +149,11 @@ test('write-through hook mirrors persistOauthToVm into DB', () => {
 test('vm-registry writes are mirrored (setVmSchedulable)', () => {
   seedVmFile('vm-t3')
   initVmDbSync(project, { watch: false })
-  setVmSchedulable(project, 'vm-t3', false, 'test-reason')
+  setVmSchedulable(project, 'vm-t3', false, 'proxy_desynced')
   const row = new VmsRepo(getDb()).get('vm-t3')
   assert.equal(row.schedulable, false)
-  assert.equal(row.vm.schedule_disabled_reason, 'test-reason')
+  assert.equal(row.vm.schedule_disabled_reason, 'proxy_desynced')
+  assert.equal(row.vm.unschedulable.reason, 'proxy_desynced')
 })
 
 test('setVmSchedulable preserveStatus keeps running when operator disables', () => {
@@ -164,14 +166,14 @@ test('setVmSchedulable preserveStatus keeps running when operator disables', () 
   assert.equal(off.schedule_disabled_reason, 'disabled')
 })
 
-test('setVmSchedulable(true) restores soft-paused status to running', () => {
+test('lifting a worker-reload hold restores soft-paused status to running', () => {
   seedVmFile('vm-t3b')
   initVmDbSync(project, { watch: false })
-  setVmSchedulable(project, 'vm-t3b', false, 'proxy_rebind_worker_restart')
+  setVmSchedulable(project, 'vm-t3b', false, 'proxy_rebind_worker_reload')
   const paused = JSON.parse(fs.readFileSync(path.join(project, 'vms', 'vm-t3b.json'), 'utf8'))
   assert.equal(paused.status, 'paused')
   assert.equal(paused.schedulable, false)
-  setVmSchedulable(project, 'vm-t3b', true)
+  clearScheduleHold(project, 'vm-t3b', 'maintenance')
   const ready = JSON.parse(fs.readFileSync(path.join(project, 'vms', 'vm-t3b.json'), 'utf8'))
   assert.equal(ready.status, 'running')
   assert.equal(ready.schedulable, true)
@@ -191,6 +193,31 @@ test('reconcile rebuilds missing vm file from DB (restore pull-up)', () => {
   assert.equal(back.claude.has_access, true)
   assert.equal(back.claude.has_refresh, true)
   assert.equal(back.claude.email, vm.claude.email)
+})
+
+test('removing a slot drops it from every named pool', () => {
+  seedVmFile('vm-p5')
+  seedVmFile('vm-p6')
+  initVmDbSync(project, { watch: false })
+  const pools = new VmPoolsRepo(getDb())
+  const pool = pools.insert({ name: 'shared' })
+  pools.setMembers(pool.id, ['vm-p5', 'vm-p6'])
+  assert.equal(removeVmFromDb('vm-p5'), true)
+  assert.deepEqual(pools.get(pool.id).vm_ids, ['vm-p6'])
+})
+
+test('reconcile prunes pool members whose slot vanished outside the panel', () => {
+  seedVmFile('vm-p7')
+  initVmDbSync(project, { watch: false })
+  const pools = new VmPoolsRepo(getDb())
+  const pool = pools.insert({ name: 'ghosts' })
+  pools.setMembers(pool.id, ['vm-p7'])
+  getDb()
+    .prepare('INSERT INTO vm_pool_members (pool_id, vm_id, created_at) VALUES (?, ?, ?)')
+    .run(pool.id, 'niutopia2000', new Date().toISOString())
+  const res = reconcileVms(project)
+  assert.deepEqual(res.pruned_pool_members, ['niutopia2000'])
+  assert.deepEqual(pools.get(pool.id).vm_ids, ['vm-p7'])
 })
 
 test('removeVmFromDb drops the row', () => {
