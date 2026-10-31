@@ -19,6 +19,7 @@ test('upgrade migrates running and paused local proxy containers without startin
     { id: 'vm-04', proxy, node_id: 'remote' },
     { id: 'vm-05', proxy },
     { id: 'vm-06', proxy },
+    { id: 'vm-07', status: 'running', schedulable: false, proxy },
   ]
   const changed = syncLocalSlotRestartPolicies(vms, {
     run: (args) => {
@@ -40,7 +41,7 @@ test('upgrade migrates running and paused local proxy containers without startin
     ],
   )
   assert.equal(
-    calls.some((args) => ['kin-03', 'kin-04'].includes(args.at(-1))),
+    calls.some((args) => ['kin-03', 'kin-04', 'kin-07'].includes(args.at(-1))),
     false,
   )
 })

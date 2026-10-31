@@ -206,11 +206,11 @@ function updateSlotRestartPolicy(vm, existing, run) {
   return { ...result, changed: result.ok === true }
 }
 
-/** Migrate existing local slots in place, including paused ones; never start or recreate them. */
+/** Migrate existing enabled local slots in place; leave operator-disabled slots untouched. */
 export function syncLocalSlotRestartPolicies(vms, { run = sh } = {}) {
   const changed = []
   for (const vm of vms) {
-    if (!vm?.id || vm.node_id || isLocalEgressProxy(vm.proxy)) continue
+    if (!vm?.id || vm.schedulable === false || vm.node_id || isLocalEgressProxy(vm.proxy)) continue
     const inspected = inspectContainerOutcome(containerName(vm.id), { run })
     if (inspected.status === 'missing') continue
     if (inspected.status === 'error') throw new Error(`slot restart policy ${vm.id}: ${inspected.error}`)
