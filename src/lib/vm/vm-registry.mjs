@@ -97,6 +97,7 @@ export function summarizeVm(vm, projectRoot = null, routing = null) {
     platform: kind.platform,
     family: kind.family,
     codex_kernel: kind.kind === 'codex',
+    codex_cli: vm.codex_cli || null,
     email: kind.kind === 'codex' ? codex?.email || null : vm.claude?.email || null,
     account_uuid: kind.kind === 'codex' ? null : vm.claude?.account_uuid || null,
     org_uuid: kind.kind === 'codex' ? vm.codex?.chatgpt_account_id || null : vm.claude?.org_uuid || null,

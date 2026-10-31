@@ -52,6 +52,7 @@ export function vmHasProxyPath(vm) {
 }
 
 export function isCredentialRefreshTarget(vm) {
+  if (vm?.codex_cli?.enabled) return false // Managed CLI refreshes inside the guest, on demand.
   if (!vm?.id || vm.schedulable === false) return false
   if (!hasRefreshPresence(vm.claude) && !vm.has_refresh) return false
   const status = String(vm.status || '').toLowerCase()

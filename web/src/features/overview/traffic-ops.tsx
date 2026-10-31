@@ -182,9 +182,19 @@ export function TrafficOps({
       hint: `当前 ${fmtRate(o.qps?.current)} · 峰值 ${fmtRate(o.qps?.peak)}`,
     },
     {
-      label: 'TPS',
+      label: '吞吐 TPS',
       value: fmtRate(o.tps?.avg, 1),
       hint: `入 ${fmtNum(o.input_tokens || 0)} / 出 ${fmtNum(o.output_tokens || 0)}`,
+    },
+    {
+      label: '平均 Token / 请求',
+      value: o.average_usage?.total_tokens == null ? '—' : fmtRate(o.average_usage.total_tokens, 1),
+      hint: `${fmtNum(o.average_usage?.samples || 0)} 个有实际用量的请求`,
+    },
+    {
+      label: 'CLI 平均生成速度',
+      value: o.cli_generation?.output_tokens_per_second == null ? '—' : `${fmtRate(o.cli_generation.output_tokens_per_second, 1)} tok/s`,
+      hint: `输出含推理 / 生成总耗时 · ${fmtNum(o.cli_generation?.samples || 0)} 样本`,
     },
     {
       label: '流式占比',

@@ -15,6 +15,7 @@ import {
 function billingBandLabels(row: VmBillingModelRow): string[] {
   const out: string[] = []
   if (row.service_tier === 'fast') out.push('Fast')
+  else if (row.service_tier === 'ultrafast') out.push('Ultrafast')
   else if (row.service_tier === 'flex') out.push('Flex')
   else if (row.service_tier) out.push(row.service_tier)
   if (row.speed === 'fast') out.push('Fast mode')

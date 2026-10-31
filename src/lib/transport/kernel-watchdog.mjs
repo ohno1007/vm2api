@@ -97,6 +97,7 @@ export function normalizeKernelWatchdogConfig(raw = {}) {
 const HARD_DOWN = new Set(['stopped', 'dead', 'error', 'disabled'])
 
 export function isKernelWatchdogTarget(vm, routing = {}) {
+  if (vm?.codex_cli?.enabled) return false // Reconnect on demand; no unused legacy-kernel watchdog.
   if (!vm?.id || vm.schedulable === false) return false
   if (HARD_DOWN.has(String(vm.status || '').toLowerCase())) return false
   // Effective engine, not the slot's own fields: panel-created slots omit

@@ -118,6 +118,8 @@ export interface CreateVmDraft {
   isAdmin: boolean
   pinnedAfter?: CreateVmAfter
   platform: Platform
+  codexCli: boolean
+  setCodexCli: (next: boolean) => void
   setPlatform: (next: Platform) => void
   kernel: string
   setKernel: (next: string) => void
@@ -165,6 +167,7 @@ export function useCreateVmDraft({
 } = {}): CreateVmDraft {
   const qc = useQueryClient()
   const [platform, setPlatform] = useState<Platform>('anthropic')
+  const [codexCli, setCodexCli] = useState(false)
   const [kernel, setKernel] = useState<string>(KERNELS[0].id)
   const [name, setName] = useState('')
   const [after, setAfter] = useState<string>(pinnedAfter || 'start')
@@ -227,6 +230,7 @@ export function useCreateVmDraft({
           ...deriveAfter(after),
           platform,
           family: platform === 'openai' ? 'codex' : 'claude',
+          ...(codexCli && platform === 'openai' && runtimeType === 'kvm' && !nodeId ? { codex_cli: { enabled: true } } : {}),
           ...(nodeId ? { node_id: nodeId } : {}),
           ...(wantsExit && exit.proxyId ? { proxy_id: exit.proxyId } : {}),
           ...createMachinePayload({ runtimeType, memory, vcpus, diskGb }),
@@ -272,6 +276,8 @@ export function useCreateVmDraft({
     isAdmin: me.data?.role === 'admin',
     pinnedAfter,
     platform,
+    codexCli,
+    setCodexCli,
     setPlatform,
     kernel,
     setKernel,
@@ -498,6 +504,12 @@ export function CreateVmForm({
 
   return (
     <div className='space-y-5'>
+      {d.platform === 'openai' && kvm && !remote && (
+        <label className='flex items-center gap-2 rounded-md border p-3 text-sm'>
+          <input type='checkbox' checked={d.codexCli} onChange={e => { d.setCodexCli(e.target.checked); if (e.target.checked) d.setKernel('ubuntu-24.04') }} />
+          使用官方 Codex CLI 与独立 Linux 虚拟机身份
+        </label>
+      )}
       <Section title='平台' hint='决定槽里跑哪种账号，创建后不能改。'>
         <ChoiceTiles
           label='槽位平台'

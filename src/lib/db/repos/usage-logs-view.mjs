@@ -142,6 +142,7 @@ function specialSettings(row) {
     out.push({ key: 'mismatch', label: '模型重定向', value: `${row.requested_model} → ${row.upstream_model}` })
   if (row.speed === 'fast') out.push({ key: 'fast', label: 'Fast 模式', value: row.speed })
   if (row.service_tier === 'priority') out.push({ key: 'priority', label: 'Priority', value: row.service_tier })
+  if (row.service_tier === 'ultrafast') out.push({ key: 'ultrafast', label: 'Ultrafast', value: row.service_tier })
   // Sent priority, upstream echoed another tier: Codex did not serve it as Fast (#777).
   if (
     (row.service_tier === 'priority' || row.service_tier === 'fast') &&

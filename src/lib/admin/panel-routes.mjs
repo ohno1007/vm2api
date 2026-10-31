@@ -1,3 +1,6 @@
+import { codexCliPanel } from './codex-cli-panel.mjs'
+import { clearCodexCliAuth } from '../vm/codex-cli-auth.mjs'
+import { stopCodexCli } from '../transport/codex-cli-supervisor.mjs'
 /**
  * /admin and /api/panel routes. Login / logout / me and { ok, data }
  * envelopes are unchanged; slot start/reload go through startSlotReady.
@@ -427,6 +430,7 @@ async function commitImportedCodexVm({
     const identity = openaiIdentityFromOauthTokens(account)
     if (savedMailbox.configured && String(identity.email || account.email || '').toLowerCase() !== savedMailbox.email) mailbox.remove(existing.id)
   } catch { /* Manual import remains available when the old mailbox configuration is unreadable. */ }
+  if (existing.codex_cli?.enabled) { await stopCodexCli(existing.id); clearCodexCliAuth(cfg.paths.project, existing.id) }
   const saved = upsertCodexAccount(cfg.paths.project, existing.id, account, { replaceCredentials: true })
   existing.platform = 'openai'
   existing.family = 'codex'
@@ -475,7 +479,7 @@ async function commitImportedCodexVm({
   }
   let catalog = null
   try {
-    catalog = await syncCodexCatalog({
+    if (!existing.codex_cli?.enabled) catalog = await syncCodexCatalog({
       projectRoot: cfg.paths.project,
       vmId: existing.id,
       rotate: true,
@@ -1405,6 +1409,7 @@ export function createPanelHandler(ctx) {
       ) {
         return true
       }
+      if (await codexCliPanel({ req, res, pathname: p, projectRoot: cfg.paths.project, readBody, json })) return true
       const credentialPoolMatch = p.match(/^\/api\/panel\/login-credentials(?:\/(import|cred-[a-f0-9-]{36})(?:\/(reveal))?)?$/)
       if (credentialPoolMatch) {
         res.setHeader('Cache-Control', 'no-store')
@@ -3539,6 +3544,7 @@ export function createPanelHandler(ctx) {
           for (const file of [
             path.join(slotDir, 'codex-credentials.json'),
             path.join(slotDir, 'cli-home', '.codex', 'auth.json'),
+            path.join(slotDir, 'cli-home', '.codex-vm2api', 'auth.json'),
             path.join(slotDir, 'cli-home', '.claude', 'credentials.json'),
             path.join(slotDir, 'cli-home', '.claude', '.credentials.json'),
           ]) {
@@ -4185,6 +4191,9 @@ export function createPanelHandler(ctx) {
         }
         let generated
         try {
+          if (body.codex_cli?.enabled && (body.platform !== 'openai' || runtime !== 'kvm' || nodeId || wantKernel !== 'ubuntu-24.04')) {
+            return json(res, 400, { ok: false, error: { code: 'codex_cli_requires_local_ubuntu_kvm' } })
+          }
           generated = assignComputerFingerprint(
             cfg.paths.project,
             {
@@ -4192,6 +4201,7 @@ export function createPanelHandler(ctx) {
               kernel: wantKernel,
               timezone: requestedTimezone,
               locale: requestedLocale,
+              codex_cli: body.codex_cli?.enabled === true ? { enabled: true } : null,
               runtime: { type: runtime },
             },
             { taken: takenFingerprintKeys(existing) },
@@ -4251,6 +4261,10 @@ export function createPanelHandler(ctx) {
         }
         if (nodeId) vm.node_id = nodeId
         stampVmKind(vm, body)
+        if (body.codex_cli?.enabled === true) {
+          if (!isCodexVm(vm) || runtime !== 'kvm' || nodeId) return json(res, 400, { ok: false, error: { code: 'local_codex_kvm_required' } })
+          vm.codex_cli = { enabled: true, parallel: 2 }
+        }
         const openaiPolicy = normalizeOpenAIQuotaPolicy(ctx.routingConfig?.codex?.quota)
         const explicitConcurrency =
           Object.prototype.hasOwnProperty.call(body, 'max_concurrency') ||

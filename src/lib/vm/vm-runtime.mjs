@@ -1,3 +1,4 @@
+import { isCodexCliVm } from './codex-cli-config.mjs'
 /**
  * Real VM runtime: one Docker container per kin VM.
  * Mixed guest OS: Ubuntu 24.04 / Debian 12 / Arch / Fedora 41.
@@ -660,6 +661,7 @@ function kvmEnvPairs(vm, { uid, gid, memMb, accel, hostName, machineId, shares, 
     `KIN_KVM_MACHINE_ID=${machineId}`,
     `KIN_KVM_ACCEL=${accel}`,
     `KIN_KVM_SHARES=${shares}`,
+    `KIN_VM_ENGINE=${isCodexCliVm(vm) ? 'codex-cli' : 'legacy'}`,
   ]
 }
 
@@ -935,6 +937,7 @@ export function dockerSlotResourceArgs(vm, routing) {
 }
 
 export async function startVmRuntime(vm, projectRoot, { recreate = false, routing, accel: accelOpt } = {}) {
+  if (isCodexCliVm(vm) && (!isKvmRuntime(vm) || (vm.kernel && vm.kernel !== 'ubuntu-24.04'))) return { ok: false, error: 'codex_cli_requires_local_ubuntu_kvm' }
   if (!isKvmRuntime(vm)) slotDockerCpus(vm) // reject corrupt persisted quotas before any lifecycle changes
   if (isKvmRuntime(vm) && accelOpt !== 'kvm' && accelOpt !== 'tcg') {
     const recorded = vm.runtime?.accel
@@ -958,7 +961,7 @@ export async function startVmRuntime(vm, projectRoot, { recreate = false, routin
   vm.locale = vm.locale || STANDARD_LOCALE
   const resolvedRouting = resolveSlotRouting(projectRoot, routing)
   const mem = slotMemory(vm, resolvedRouting)
-  const image = kvm ? kvmImageForKernel(kernel) : imageForKernel(kernel)
+  const image = isCodexCliVm(vm) ? (process.env.CODEX_CLI_KVM_IMAGE || 'local/vm2api-codex-kvm:1') : kvm ? kvmImageForKernel(kernel) : imageForKernel(kernel)
   const home = path.join(projectRoot, 'vms', vm.id, 'cli-home')
   fs.mkdirSync(home, { recursive: true })
   try {
@@ -1059,7 +1062,7 @@ export async function startVmRuntime(vm, projectRoot, { recreate = false, routin
   if (!kvm && !computer?.mac) return { ok: false, error: 'computer MAC missing' }
   host = computer.hostname
 
-  const img = ensureSlotImage(kernel, { projectRoot, runtime: runtimeKind(vm) })
+  const img = isCodexCliVm(vm) ? { ok: sh(['docker', 'image', 'inspect', image]).ok, error: 'codex_cli_kvm_image_missing' } : ensureSlotImage(kernel, { projectRoot, runtime: runtimeKind(vm) })
   if (!img.ok) return img
 
   try {

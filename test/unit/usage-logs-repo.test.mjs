@@ -51,6 +51,20 @@ function assertHit(stats, prompt, read, label) {
   assert.equal(stats.cache_hit_rate, prompt > 0 ? read / prompt : null, `${label} cache_hit_rate`)
 }
 
+test('averages exclude unknown usage and generation speed is a weighted ratio', () => {
+  const { dir, db, repo } = freshDb()
+  try {
+    seed(repo, [
+      { via: 'codex-cli', input_tokens: 20, cache_read_tokens: 80, output_tokens: 100, generation_ms: 1000 },
+      { via: 'codex-cli', input_tokens: 30, cache_read_tokens: 70, output_tokens: 900, generation_ms: 9000 },
+      { via: 'codex-cli', status: 502, input_tokens: null, output_tokens: null, generation_ms: 20_000 },
+    ])
+    const result = repo.windowStats()
+    assert.deepEqual(result.average_usage, { samples: 2, input_tokens: 100, output_tokens: 500, total_tokens: 600 })
+    assert.deepEqual(result.cli_generation, { samples: 2, output_tokens_per_second: 100 })
+  } finally { db.close(); fs.rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('debugBytes counts stored JSON bytes for empty, ASCII, and UTF-8 records', () => {
   const { dir, db, repo } = freshDb()
   try {

@@ -152,7 +152,7 @@ function toRow(rec) {
       c === 'image_input_tokens' ||
       c === 'image_output_tokens'
     )
-      return Number(rec[c]) || 0
+      return rec.via === 'codex-cli' && (c === 'input_tokens' || c === 'output_tokens') && rec[c] == null ? null : Number(rec[c]) || 0
     return rec[c] ?? null
   })
 }
@@ -1368,9 +1368,19 @@ export class UsageLogsRepo {
       where = where ? `${where} AND ${own.sql}` : `WHERE ${own.sql}`
       allParams.push(...own.params)
     }
+    // Known measurements only; unknown usage is not a zero-token request.
+    const measured = `(input_tokens IS NOT NULL AND output_tokens IS NOT NULL AND ((${TOTAL_TOKENS_SQL}) > 0 OR via = 'codex-cli'))`
+    const timed = `(${measured} AND generation_ms > 0 AND via = 'codex-cli')`
     const counts = this.db
       .prepare(`
       SELECT
+        COUNT(CASE WHEN ${measured} THEN 1 END) AS usage_samples,
+        SUM(CASE WHEN ${measured} THEN ${TOTAL_TOKENS_SQL} END) AS measured_total_tokens,
+        SUM(CASE WHEN ${measured} THEN ${PROMPT_TOKENS_SQL} END) AS measured_input_tokens,
+        SUM(CASE WHEN ${measured} THEN output_tokens END) AS measured_output_tokens,
+        COUNT(CASE WHEN ${timed} THEN 1 END) AS generation_samples,
+        SUM(CASE WHEN ${timed} THEN output_tokens END) AS timed_output_tokens,
+        SUM(CASE WHEN ${timed} THEN generation_ms END) AS measured_generation_ms,
         COUNT(*) AS requests,
         SUM(CASE WHEN ${SLA_SUCCESS_PRED} THEN 1 ELSE 0 END) AS success,
         SUM(CASE WHEN ${SLA_ERROR_PRED} THEN 1 ELSE 0 END) AS errors,
@@ -1472,6 +1482,18 @@ export class UsageLogsRepo {
         current: lastMinute ? Number(lastMinute.requests || 0) / 60 : 0,
         peak: peakReq / 60,
         avg: requests / windowSeconds,
+      },
+      average_usage: {
+        samples: Number(counts.usage_samples || 0),
+        input_tokens: counts.usage_samples ? counts.measured_input_tokens / counts.usage_samples : null,
+        output_tokens: counts.usage_samples ? counts.measured_output_tokens / counts.usage_samples : null,
+        total_tokens: counts.usage_samples ? counts.measured_total_tokens / counts.usage_samples : null,
+      },
+      cli_generation: {
+        samples: Number(counts.generation_samples || 0),
+        // Ratio of sums, never the unweighted mean of per-request token rates.
+        output_tokens_per_second: counts.measured_generation_ms > 0
+          ? counts.timed_output_tokens * 1000 / counts.measured_generation_ms : null,
       },
       tps: {
         current: lastMinute ? Number(lastMinute.tokens || 0) / 60 : 0,

@@ -27,6 +27,7 @@ export function normalizeOpenaiServiceTier(raw) {
   if (!t || t === 'default' || t === 'standard' || t === 'auto') return 'standard'
   if (t === 'flex') return 'flex'
   if (t === 'fast' || t === 'priority') return 'fast'
+  if (t === 'ultrafast') return 'ultrafast'
   return null
 }
 
@@ -152,6 +153,7 @@ function openaiBillingMode(usage) {
   if (!tier) return { tier: null, mode: null }
   if (tier === 'flex') return { tier, mode: 'flex' }
   if (tier === 'fast') return { tier, mode: 'priority' }
+  if (tier === 'ultrafast') return { tier, mode: 'ultrafast' }
   return { tier, mode: 'standard' }
 }
 

@@ -22,6 +22,17 @@ function tmpStore(mode = 'normal') {
   return new RequestLogStore({ dataDir: dir, mode })
 }
 
+test('missing CLI usage stays unknown through logging and persistence', () => {
+  const store = tmpStore()
+  const ctx = store.start({ method: 'POST', headers: {}, socket: {} }, { protocol: 'openai.responses', pathName: '/v1/responses' })
+  const result = store.finish(ctx, { status: 502, via: 'codex-cli', error_code: 'codex_cli_timeout' })
+  assert.equal(result.input_tokens, null)
+  assert.equal(result.output_tokens, null)
+  const [persisted] = store.listNormal({ limit: 1 })
+  assert.equal(persisted.input_tokens, null)
+  assert.equal(persisted.output_tokens, null)
+})
+
 test('resolveLogMode: env + header overrides', () => {
   assert.equal(resolveLogMode('normal', { headers: {} }), 'normal')
   assert.equal(resolveLogMode('normal', { headers: { 'x-kin-debug': '1' } }), 'debug')

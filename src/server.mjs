@@ -1245,7 +1245,7 @@ process.on('unhandledRejection', (e) => console.error('[unhandled]', e))
 
 // Graceful shutdown: stop schedulers/watchers, close the DB (WAL checkpoint).
 let _shuttingDown = false
-function shutdown(signal) {
+async function shutdown(signal) {
   if (_shuttingDown) return
   _shuttingDown = true
   installJevUsageRecorder(null)
@@ -1294,6 +1294,10 @@ function shutdown(signal) {
   } catch {}
   try {
     server.close(() => {})
+  } catch {}
+  try {
+    const { stopAllCodexCli } = await import('./lib/transport/codex-cli-supervisor.mjs')
+    await stopAllCodexCli()
   } catch {}
   try {
     closeDatabase()

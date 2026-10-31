@@ -12,6 +12,7 @@ import { dashboardQueryOptions } from '@/features/overview/queries'
 import type { CommitResult } from '@/features/vm/credential-panel'
 import { vmQueryOptions } from '@/features/vm/queries'
 import { CodexMailboxPanel } from './codex-mailbox-panel'
+import { CodexCliPanel } from './codex-cli-panel'
 
 type CodexImportMode =
   'oauth' | 'access_token' | 'refresh_token' | 'json' | 'microsoft_mailbox'
@@ -220,6 +221,7 @@ export function CodexCredentialPanel({
 
   return (
     <div className='space-y-3'>
+      <CodexCliPanel vm={vm} />
       <Hint>
         对齐 Codex Desktop：支持微软邮箱自动授权、OAuth
         授权或账号文件（auth.json）。不要用 Claude sessionKey、Setup Token 或

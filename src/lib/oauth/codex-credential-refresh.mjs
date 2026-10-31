@@ -23,6 +23,7 @@ export async function ensureCodexCredential(projectRoot, vmId, { force = false, 
   return withVmLock(codexCredentialPath(projectRoot, vmId), async () => {
     const vm = getVm(projectRoot, vmId)
     if (!vm) return { ok: false, refresh_class: 'fatal', error: { code: 'vm_not_found' } }
+    if (vm.codex_cli?.enabled) return { ok: false, refresh_class: 'skipped', error: { code: 'managed_by_guest_cli' } }
     if (vm.schedulable === false) return { ok: false, refresh_class: 'skipped', error: { code: 'slot_resting', message: 'Slot scheduling is disabled' } }
     const account = readCodexAccounts(projectRoot, vmId)[0] || {}
     if (!account.refresh_token) {

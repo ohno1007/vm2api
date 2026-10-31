@@ -517,6 +517,7 @@ export class RequestLogStore {
     if (!ctx || ctx.mode === 'off') return null
     const duration_ms = Math.max(0, Date.now() - (ctx.t0 || Date.now()))
     const usage = normalizeUsage(disjointOpenaiUsage(extra.usage || {}) || {})
+    const unknownCliUsage = extra.via === 'codex-cli' && !extra.usage && extra.input_tokens == null && extra.output_tokens == null
     const breakdown = cacheCreationBreakdown(usage)
     const webSearch = extra.web_search_requests ?? webSearchRequestsOf(usage)
     const billedUsage = {
@@ -554,8 +555,8 @@ export class RequestLogStore {
       vm_id: extra.vm_id || null,
       account_id: extra.account_id || null,
       workspace: extra.workspace || null,
-      input_tokens: extra.input_tokens ?? usage.input_tokens ?? null,
-      output_tokens: extra.output_tokens ?? usage.output_tokens ?? null,
+      input_tokens: unknownCliUsage ? null : extra.input_tokens ?? usage.input_tokens ?? null,
+      output_tokens: unknownCliUsage ? null : extra.output_tokens ?? usage.output_tokens ?? null,
       error_code: extra.error_code || null,
       error_message: extra.error_message ? String(extra.error_message).slice(0, 300) : null,
       user_agent: ctx.user_agent,

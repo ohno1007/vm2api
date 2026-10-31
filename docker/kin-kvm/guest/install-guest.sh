@@ -156,6 +156,8 @@ if [ "$NEED_REBOOT" = 1 ]; then
 fi
 
 systemctl start kin-guest-setup.service
-systemctl start kin-kernel.service
-systemctl start kin-kernel-relay.service
+if ! systemctl is-enabled kin-kernel.service 2>/dev/null | grep -q masked; then
+  systemctl start kin-kernel.service
+  systemctl start kin-kernel-relay.service
+fi
 log "units enabled"

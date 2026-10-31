@@ -1,3 +1,4 @@
+import { ensureCodexCli, codexCliModels } from '../transport/codex-cli-supervisor.mjs'
 /**
  * Per-VM connectivity probe.
  *
@@ -174,6 +175,17 @@ export async function syncCodexCatalog({
   const targets = listCodexVmsForCatalog(projectRoot, vm && isCodexVm(vm) ? vm : null)
   if (!targets.length) {
     return { ok: false, error: 'no_codex_slot', message: '没有可用的 GPT OAuth 槽', ids: [], synced: 0 }
+  }
+  const cliTarget = targets.find(t => t.codex_cli?.enabled)
+  if (cliTarget) {
+    const ready = await ensureCodexCli({ vm: cliTarget, projectRoot, homeDir: path.join(projectRoot, 'vms', cliTarget.id, 'cli-home') })
+    if (!ready.ok) return { ok: false, error: ready.reason, ids: [], synced: 0 }
+    try {
+      const { models } = await codexCliModels(ready.runtime)
+      const rows = models.map(m => ({ ...m, id: m.model || m.id }))
+      const { added } = syncGptIdsIntoPolicy(rows)
+      return { ok: true, vm_id: cliTarget.id, ids: rows.map(m => m.id), added, synced: rows.length, source: 'codex-cli' }
+    } catch (e) { return { ok: false, error: e.code || 'cli_catalog_failed', ids: [], synced: 0 } }
   }
   const catalogVersion = await resolveCodexCatalogVersion({
     configuredVersion: catalogClientVersion,

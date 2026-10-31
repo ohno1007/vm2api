@@ -78,6 +78,8 @@ export type OpsWindow = {
   cache_hit_rate?: number | null
   sticky?: { selections?: number; hits?: number; rate?: number | null }
   qps?: { current?: number; peak?: number; avg?: number }
+  average_usage?: { samples: number; input_tokens: number | null; output_tokens: number | null; total_tokens: number | null }
+  cli_generation?: { samples: number; output_tokens_per_second: number | null }
   tps?: { current?: number; peak?: number; avg?: number }
   duration?: LatencySummary
   ttft?: LatencySummary

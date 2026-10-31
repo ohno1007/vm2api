@@ -193,7 +193,7 @@ test('GPT-5.5 official standard: $5 / $30 per MTok', () => {
   const c = calculateCost({ input_tokens: 200_000, output_tokens: 200_000 }, 'gpt-5.5')
   assert.equal(c.known, true)
   assert.equal(c.price_source, 'builtin')
-  assert.equal(c.price_version, 'builtin-2026-10-14')
+  assert.equal(c.price_version, 'builtin-2026-11-01')
   assert.equal(c.input_cost, 1)
   assert.equal(c.output_cost, 6)
   assert.equal(c.total_cost, 7)

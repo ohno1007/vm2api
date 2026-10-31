@@ -6,7 +6,7 @@ import { SettingsRepo } from '../db/repos/settings-repo.mjs'
 import { BUILTIN_ALIASES, BUILTIN_RATES, BUILTIN_SOURCE } from './builtin-rates.mjs'
 
 export const PRICE_FIELDS = ['input', 'output', 'cache_read', 'cache_5m', 'cache_1h']
-export const MODE_NAMES = ['fast', 'flex', 'priority']
+export const MODE_NAMES = ['fast', 'flex', 'priority', 'ultrafast']
 export const MODELS_DEV_URL = 'https://models.dev/api.json'
 export const MODELS_DEV_TIMEOUT_MS = 30_000
 export const MODELS_DEV_MAX_BYTES = 64 * 1024 * 1024

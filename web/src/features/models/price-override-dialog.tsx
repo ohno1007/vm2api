@@ -19,7 +19,7 @@ import { Label } from '@/components/ui/label'
 import { cacheFillHint } from '@/features/models/price-display'
 import { invalidatePricing } from '@/features/models/queries'
 
-type ModeKey = 'fast' | 'flex' | 'priority'
+type ModeKey = 'fast' | 'flex' | 'priority' | 'ultrafast'
 
 type FieldDraft = {
   input: string
@@ -43,13 +43,14 @@ type Draft = FieldDraft & {
 /** Anthropic prices `fast`; OpenAI service tiers are flex / priority. */
 const PLATFORM_MODES: Record<'anthropic' | 'openai', ModeKey[]> = {
   anthropic: ['fast'],
-  openai: ['flex', 'priority'],
+  openai: ['flex', 'priority', 'ultrafast'],
 }
 
 const MODE_LABEL: Record<ModeKey, string> = {
   fast: 'fast',
   flex: 'flex',
   priority: 'priority',
+  ultrafast: 'ultrafast',
 }
 
 function emptyFields(): FieldDraft {
@@ -79,7 +80,7 @@ function fromImage(price: Price | null | undefined): ImageDraft | null {
 function fromEntry(entry: PricingEntry): Draft {
   const src = entry.override ?? entry.effective
   const modes: Draft['modes'] = {}
-  for (const key of ['fast', 'flex', 'priority'] as const) {
+  for (const key of ['fast', 'flex', 'priority', 'ultrafast'] as const) {
     const mode = src?.modes?.[key]
     modes[key] = mode ? fromPrice(mode) : null
   }
@@ -143,6 +144,7 @@ type OverridePrice = {
     fast?: OverridePrice
     flex?: OverridePrice
     priority?: OverridePrice
+    ultrafast?: OverridePrice
   }
   image?: { input: number; output: number; cache_read: number }
 }
@@ -186,7 +188,7 @@ function assemblePrice(d: Draft): OverridePrice | { error: string } {
     base.tiers = tiers
   }
   const modes: NonNullable<OverridePrice['modes']> = {}
-  for (const key of ['fast', 'flex', 'priority'] as const) {
+  for (const key of ['fast', 'flex', 'priority', 'ultrafast'] as const) {
     const mode = d.modes[key]
     if (!mode) continue
     const body = assembleFields(mode, `${key} `)
@@ -456,10 +458,10 @@ export function PriceOverrideDialog({
           <section className='space-y-3'>
             <h4 className='text-sm font-medium'>
               {platform === 'openai'
-                ? '服务档位价（flex / priority）'
+                ? '服务档位价（flex / priority / ultrafast）'
                 : '档位价（fast）'}
             </h4>
-            {(['fast', 'flex', 'priority'] as const)
+            {(['fast', 'flex', 'priority', 'ultrafast'] as const)
               // An existing price for the other platform's mode stays visible so it is not lost.
               .filter(
                 (mode) =>

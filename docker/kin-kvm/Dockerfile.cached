@@ -1,0 +1,9 @@
+# Reuse the installed distro/cloud disk to avoid downloading another 600 MB.
+# All lifecycle, guest setup and execution scripts below come from this repository.
+ARG RUNNER_BASE=ghcr.io/dofastted/kin-kvm-ubuntu:24.04
+FROM ${RUNNER_BASE}
+COPY kin-kvm-entry kin-guest-exec /usr/local/bin/
+COPY guest/ /opt/kin-kvm/guest/
+RUN chmod 755 /usr/local/bin/kin-kvm-entry /usr/local/bin/kin-guest-exec /opt/kin-kvm/guest/kin-guest-setup /opt/kin-kvm/guest/install-guest.sh /opt/kin-kvm/guest/kin-kernel-start /opt/kin-kvm/guest/kin-kernel-relay.py
+LABEL vm2api.engine=codex-cli
+ENTRYPOINT ["/usr/local/bin/kin-kvm-entry"]

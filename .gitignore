@@ -73,3 +73,4 @@ patches/
 .omp
 /dist/
 share/wrap-cli/dist/
+share/codex-cli/

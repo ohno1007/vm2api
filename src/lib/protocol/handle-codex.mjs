@@ -820,6 +820,8 @@ export async function handleCodexProtocol({
               routing,
               body: outboundBody,
               reqHeaders: req.headers,
+              originalBody: inbound || ctx.body,
+              responseStore: (inbound || ctx.body)?.store !== false,
               envelope: {
                 body: outboundBody,
                 headers: outboundHeaders,
@@ -898,6 +900,7 @@ export async function handleCodexProtocol({
           ? Math.max(0, result.firstByteAt - requestStartedAt)
           : (result?.firstByteMs ?? null)
         logBag.generation_ms = result?.generationMs ?? null
+        if (result?.via === 'codex-cli') logBag.via = 'codex-cli'
         if (conversionError) {
           result.ok = false
           result.status = 502
@@ -914,6 +917,15 @@ export async function handleCodexProtocol({
         const hopUsage = result.usage || result.body?.usage || result.body?.response?.usage || null
         const preferredUsage = preferUsage(hopUsage, streamedUsage)
         const usage = mergeUsage(preferredUsage === hopUsage ? streamedUsage : hopUsage, preferredUsage)
+        // A failed/cancelled CLI turn can still report billable provider usage.
+        if (result?.via === 'codex-cli' && usage) {
+          const logged = disjointOpenaiUsage({ ...usage, service_tier: result.body?.service_tier || outboundBody.service_tier })
+          logBag.usage = logged
+          logBag.input_tokens = logged.input_tokens
+          logBag.output_tokens = logged.output_tokens
+          logBag.cache_read_tokens = logged.cache_read_input_tokens ?? logged.cache_read_tokens ?? 0
+          logBag.cache_creation_tokens = logged.cache_creation_input_tokens ?? logged.cache_creation_tokens ?? 0
+        }
         // Responses SSE is not a Claude assistant message, so the stream client
         // reports ok:false / incomplete. A 200 hop that carried tokens still billed.
         const delivered = !conversionError && (result?.ok || (Number(result?.status) === 200 && usageTokens(usage) > 0))
@@ -922,7 +934,7 @@ export async function handleCodexProtocol({
           bindSticky(outboundSessionId)
           // Billing follows the tier actually sent (codex-proxy-rs contract). The upstream
           // echo is kept apart: `priority` answered with `default` is a Fast downgrade (#777).
-          const serviceTier = normalizeServiceTier(outboundBody.service_tier)
+          const serviceTier = normalizeServiceTier(result?.via === 'codex-cli' ? result.body?.service_tier ?? outboundBody.service_tier : outboundBody.service_tier)
           logBag.upstream_service_tier = responseServiceTier
           const logged = disjointOpenaiUsage(usage ? { ...usage, service_tier: serviceTier } : usage)
           logBag.usage = logged
@@ -1157,6 +1169,7 @@ async function postCodexJson({
   fetchImpl,
   refresh = refreshCodexAccessToken,
 }) {
+  if (vm.codex_cli?.enabled) return { status: 400, error: 'codex_cli_operation_unsupported' }
   const proxyUrl = hostProxyUrlForVm(vm)
   if (!fetchImpl && !proxyUrl && !isLocalEgressProxy(vm.proxy)) return { status: 0, error: 'proxy_required' }
   const doFetch = fetchImpl || makeProxyFetch(proxyUrl, timeoutMs, { maxMs: timeoutMs })

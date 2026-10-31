@@ -13,6 +13,8 @@ import { maxRequestBytes } from '../core/config.mjs'
 import { openAIRuntimeSignals } from '../pool/openai-account-runtime.mjs'
 import { codexKernelHealth, codexKernelPaths } from './codex-kernel-client.mjs'
 import { computedUpstreamTransport, normalizeCodexRouting } from '../protocol/codex-route.mjs'
+import { isCodexCliVm } from '../vm/codex-cli-config.mjs'
+import { ensureCodexCli, stopCodexCli, stopAllCodexCli, codexCliHealth } from './codex-cli-supervisor.mjs'
 
 const starts = new Map()
 const stops = new Map()
@@ -57,6 +59,7 @@ export function codexKernelRequestOptions(routing = {}) {
 
 export function writeCodexKernelConfig(projectRoot, vm, { token, proxyUrl, proxyRequired, routing } = {}) {
   if (!projectRoot || !vm?.id) return null
+  if (isCodexCliVm(vm)) return { runDir: path.join(projectRoot, 'vms', vm.id, 'run'), engine: 'codex-cli' }
   assertProxyAllowed(vm.proxy)
   if (proxyUrl) assertProxyAllowed({ url: proxyUrl })
   const runDir = path.join(projectRoot, 'vms', vm.id, 'run')
@@ -182,6 +185,7 @@ export async function finishCodexRecycle(child, socketPath, { termMs = 2000, kil
 
 /** Explicit reload must stop the host process, not just its slot container. */
 export function stopCodexKernelAndWait(exec, opts = {}) {
+  if (isCodexCliVm(exec?.vm)) return stopCodexCli(exec.vm.id)
   const vmId = exec?.vmId
   if (stops.has(vmId)) return stops.get(vmId)
   const pending = (async () => {
@@ -207,6 +211,10 @@ export function stopCodexKernelAndWait(exec, opts = {}) {
 }
 
 export async function ensureCodexKernel(exec, { timeoutMs = 8000 } = {}) {
+  if (isCodexCliVm(exec?.vm)) {
+    const result = await ensureCodexCli(exec)
+    return { ok: result.ok, reason: result.reason, reused: result.reused, engine: 'codex-cli' }
+  }
   const stopping = stops.get(exec?.vmId)
   if (stopping) {
     const stopped = await stopping
@@ -265,6 +273,7 @@ async function waitForHealth(exec, timeoutMs) {
 }
 
 export function stopCodexKernel(vmId) {
+  if (codexCliHealth(vmId).ok) void stopCodexCli(vmId)
   const child = starts.get(vmId)
   if (child) {
     try {
@@ -277,9 +286,11 @@ export function stopCodexKernel(vmId) {
 
 /** A child this process spawned for the VM that has not exited (it may still be starting or hung). */
 export function codexKernelTracked(vmId) {
+  if (codexCliHealth(vmId).ok) return true
   return !childHasExited(starts.get(vmId))
 }
 
 export function stopAllCodexKernels() {
+  void stopAllCodexCli()
   for (const vmId of [...starts.keys()]) stopCodexKernel(vmId)
 }

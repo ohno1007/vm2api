@@ -59,6 +59,7 @@ export function normalizeUsageProbeConfig(raw = {}) {
 }
 
 export function isUsageProbeTarget(vm) {
+  if (vm?.codex_cli?.enabled) return false // CLI pushes rate limits; no duplicate host polling.
   if (!vm?.id || vm.schedulable === false) return false
   if (!hasRefreshPresence(vm.claude) && !vm.has_refresh && !vm.has_token) return false
   const grantErr = String(vm.claude?.refresh_error || vm.refresh_error || '')

@@ -148,6 +148,7 @@ CLAUDE_CONFIG_DIR=/home/kincli/.claude
 TZ=${TZ:-UTC}
 LANG=${LANG:-C.UTF-8}
 KIN_VM_ID=${KIN_VM_ID:-}
+KIN_VM_ENGINE=${KIN_VM_ENGINE:-legacy}
 KIN_VM_NAME=${KIN_VM_NAME:-}
 KIN_VM_OS=${KIN_VM_OS:-}
 KIN_SUBMIT_WAIT_MS=30000
@@ -198,4 +199,11 @@ link_payload
 apply_identity
 apply_resolv
 write_slot_env
+if [ "${KIN_VM_ENGINE:-legacy}" = codex-cli ]; then
+  # No unused Claude daemon, listener, or public IPv6 route in a CLI guest.
+  systemctl disable --now kin-kernel.service kin-kernel-relay.service 2>/dev/null || true
+  systemctl mask kin-kernel.service kin-kernel-relay.service 2>/dev/null || true
+  printf 'net.ipv6.conf.all.disable_ipv6=1\nnet.ipv6.conf.default.disable_ipv6=1\n' > /etc/sysctl.d/99-codex-cli.conf
+  sysctl -p /etc/sysctl.d/99-codex-cli.conf >/dev/null
+fi
 log "ready uid=$KIN_KVM_UID gid=$KIN_KVM_GID host=${KIN_KVM_HOSTNAME:-} shares=${KIN_KVM_SHARES:-}"

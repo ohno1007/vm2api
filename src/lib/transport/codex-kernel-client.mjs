@@ -5,6 +5,9 @@
 import path from 'node:path'
 import { maxRequestBytes } from '../core/config.mjs'
 import { callGoWorker, streamGoWorker, workerHealth, workerPaths } from './go-worker-client.mjs'
+import { isCodexCliVm } from '../vm/codex-cli-config.mjs'
+import { streamCodexCli } from './codex-cli-client.mjs'
+import { codexCliHealth } from './codex-cli-supervisor.mjs'
 
 export function codexKernelPaths(exec = {}) {
   const base = workerPaths(exec)
@@ -43,6 +46,7 @@ function remapVia(result) {
 }
 
 export async function callCodexKernel(opts = {}) {
+  if (isCodexCliVm(opts.exec?.vm)) return streamCodexCli(opts)
   return remapVia(
     await callGoWorker({
       ...opts,
@@ -54,6 +58,7 @@ export async function callCodexKernel(opts = {}) {
 }
 
 export async function streamCodexKernel(opts = {}) {
+  if (isCodexCliVm(opts.exec?.vm)) return streamCodexCli(opts)
   return remapVia(
     await streamGoWorker({
       ...opts,
@@ -65,6 +70,7 @@ export async function streamCodexKernel(opts = {}) {
 }
 
 export async function codexKernelHealth(exec, opts = {}) {
+  if (isCodexCliVm(exec?.vm)) return codexCliHealth(exec.vm.id)
   const health = await workerHealth(withCodexKernelExec(exec), opts)
   if (health?.source) {
     return { ...health, source: String(health.source).replace(/go-worker/g, 'codex-kernel') }

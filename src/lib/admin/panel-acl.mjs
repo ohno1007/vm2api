@@ -172,6 +172,7 @@ function userVmPathAllowed(method, path) {
     if (rest === 'oauth/credential' || rest === 'package') return false
     return (
       rest === 'test-schedule' ||
+      /^codex-cli\/(status|models)$/.test(rest) ||
       rest.startsWith('oauth/') ||
       rest === 'probe' ||
       rest === 'count-tokens' ||
@@ -186,6 +187,7 @@ function userVmPathAllowed(method, path) {
     if (head === 'official-cc-bootstrap' || head === 'wrap-cli' || head === 'reset-fingerprint') return false
     if (head === 'owner') return false
     return (
+      /^codex-cli\/(prepare|login|stop)$/.test(rest) ||
       rest === 'schedulable' ||
       rest === 'cooldown/clear' ||
       rest === 'circuit/reset' ||
@@ -202,7 +204,7 @@ function userVmPathAllowed(method, path) {
       rest.startsWith('oauth/')
     )
   }
-  if (method === 'PUT') return rest === 'test-schedule' || rest === 'oauth/credential'
+  if (method === 'PUT') return rest === 'codex-cli/settings' || rest === 'test-schedule' || rest === 'oauth/credential'
   if (method === 'DELETE') return rest === 'test-schedule' || (rest === 'oauth/microsoft-mailbox' || rest === 'oauth/login')
   return false
 }

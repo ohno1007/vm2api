@@ -3,7 +3,7 @@
  * Anthropic cache: 5m = 1.25× input, 1h = 2× input unless a published read/write differs.
  * OpenAI cache_5m = published cache_write (0 if none); cache_1h = cache_5m.
  */
-export const BUILTIN_SOURCE = 'builtin-2026-10-14'
+export const BUILTIN_SOURCE = 'builtin-2026-11-01'
 
 const WEB_SEARCH = 0.01
 const OPENAI_LONG = 272_000
@@ -26,9 +26,10 @@ function tokenPrice(input, output, cache_read, cache_5m, cache_1h) {
 
 function openaiFrom(std, extra = {}) {
   const writeRatio = std.input ? std.cache_write / std.input : 0
+  const write1hRatio = std.input ? (std.cache_write_1h ?? std.cache_write) / std.input : 0
   const band = (input, output, cache_read) => {
     const w = writeRatio ? input * writeRatio : 0
-    return { input, output, cache_read, cache_5m: w, cache_1h: w }
+    return { input, output, cache_read, cache_5m: w, cache_1h: input * write1hRatio }
   }
   const base = band(std.input, std.output, std.cache_read)
   const unpricedLong = [{ above: OPENAI_LONG, unpriced: true }]
@@ -37,6 +38,7 @@ function openaiFrom(std, extra = {}) {
     const modes = {}
     if (extra.flex) modes.flex = { ...band(...extra.flex), tiers: unpricedLong }
     if (extra.fast) modes.priority = { ...band(...extra.fast), tiers: unpricedLong }
+    if (extra.ultrafast) modes.ultrafast = { ...band(...extra.ultrafast), tiers: unpricedLong }
     if (Object.keys(modes).length) base.modes = modes
     return base
   }
@@ -55,6 +57,12 @@ function openaiFrom(std, extra = {}) {
     if (extra.long_fast) m.tiers = [{ above: OPENAI_LONG, ...band(...extra.long_fast) }]
     else if (extra.long_standard) m.tiers = unpricedLong
     modes.priority = m
+  }
+  if (extra.ultrafast) {
+    const m = band(...extra.ultrafast)
+    if (extra.long_ultrafast) m.tiers = [{ above: OPENAI_LONG, ...band(...extra.long_ultrafast) }]
+    else if (extra.long_standard) m.tiers = unpricedLong
+    modes.ultrafast = m
   }
   if (Object.keys(modes).length) base.modes = modes
   return base
@@ -103,23 +111,27 @@ function gptImage() {
 
 const OPENAI = {
   'gpt-6-astra': openaiFrom(
-    { input: 10, output: 50, cache_read: 1, cache_write: 12.5 },
+    { input: 10, output: 50, cache_read: 1, cache_write: 12.5, cache_write_1h: 25 },
     {
       flex: [5, 25, 0.5],
       fast: [20, 100, 2],
+      ultrafast: [60, 300, 6],
       long_standard: [20, 75, 2],
       long_flex: [10, 37.5, 1],
       long_fast: [40, 150, 4],
+      long_ultrafast: [120, 450, 12],
     },
   ),
   'gpt-6.1-sol': openaiFrom(
-    { input: 2, output: 10, cache_read: 0.1, cache_write: 2.5 },
+    { input: 2, output: 10, cache_read: 0.1, cache_write: 2.5, cache_write_1h: 5 },
     {
       flex: [1, 5, 0.05],
       fast: [4, 20, 0.2],
+      ultrafast: [12, 60, 0.6],
       long_standard: [4, 15, 0.2],
       long_flex: [2, 7.5, 0.1],
       long_fast: [8, 30, 0.4],
+      long_ultrafast: [24, 90, 1.2],
     },
   ),
   'gpt-6-sol': openaiFrom(

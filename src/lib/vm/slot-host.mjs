@@ -95,6 +95,7 @@ import { isCodexVm } from './vm-kind.mjs'
 import { nodeEgressProxyUrl } from '../cluster/node-egress-socks.mjs'
 import { isKvmRuntime } from './runtime-kind.mjs'
 import { stopCodexKernel } from '../transport/codex-kernel-supervisor.mjs'
+import { stopCodexCli } from '../transport/codex-cli-supervisor.mjs'
 import { readLocalSlotSeedFiles } from './slot-seed.mjs'
 
 const noop = async () => ({ skipped: true })
@@ -123,6 +124,7 @@ const LOCAL_HOST = Object.freeze({
   setProxyEgressEnabled: async (vm, projectRoot, enabled) => {
     if (isCodexVm(vm)) {
       if (enabled) return { ok: true }
+      if (vm.codex_cli?.enabled) return await stopCodexCli(vm.id)
       const child = stopCodexKernel(vm.id)
       if (!child || child.exitCode !== null || child.signalCode !== null) return { ok: true }
       return new Promise((resolve) => {

@@ -13,6 +13,8 @@ import { atomicWriteJson } from '../vm/vm-file.mjs'
 import { generateWorkstationFingerprint, HOSTNAME_RE, MACHINE_ID_RE } from './workstation-fingerprint.mjs'
 import { isRfc4122Uuid } from './rfc4122-uuid.mjs'
 import { repairKvmFingerprintUuid } from './kvm-fingerprint-uuid.mjs'
+import { ensureCodexCliComputer } from './codex-cli-computer.mjs'
+import { isCodexCliVm } from '../vm/codex-cli-config.mjs'
 
 const MAC_RE = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
@@ -101,7 +103,17 @@ export function ensureSlotComputer(projectRoot, vm) {
   const kvm = isKvmRuntime(vm)
   const dir = fingerprintDir(projectRoot, vm.id)
   const ready = kvm ? linuxComputer(dir) : containerComputer(dir)
-  if (ready) return { ...ready, created: false }
+  if (ready) {
+    if (isCodexCliVm(vm) && kvm) {
+      const saved = JSON.parse(fs.readFileSync(path.join(dir, 'identity.json'), 'utf8'))
+      if (saved.generator === 'vm2api-codex-cli-v1') return ensureCodexCliComputer(projectRoot, vm)
+    }
+    return { ...ready, created: false }
+  }
+  if (isCodexCliVm(vm)) {
+    if (!kvm) throw Object.assign(new Error('Codex CLI computer creation requires a KVM guest'), { code: 'codex_cli_kvm_required' })
+    return ensureCodexCliComputer(projectRoot, vm)
+  }
   if (kvm && fs.existsSync(dir)) {
     repairKvmFingerprintUuid(dir)
     const repaired = linuxComputer(dir)
