@@ -7,6 +7,13 @@ export const CODEX_CLI_GUEST_WORKDIR = '/home/kincli/.local/share/vm2api-codex/w
 
 export function isCodexCliVm(vm) { return vm?.codex_cli?.enabled === true }
 
+/** First login is an explicit setup action, never a scheduling/background bypass. */
+export function canRunCodexCli(vm, { loginSetup = false } = {}) {
+  if (!vm || vm.schedule_off === true || vm.schedule_hold?.reason || (vm.schedule_manual === true && vm.schedulable === false)) return false
+  if (vm.schedulable !== false) return true
+  return loginSetup && (vm.unschedulable?.reason || vm.schedule_disabled_reason) === 'no_credential'
+}
+
 /** Managed gateway process: only caller-declared functions are exposed to the model. */
 export function codexCliAppServerArgs() {
   const disabled = [
@@ -21,6 +28,7 @@ export function codexCliAppServerArgs() {
   return ['app-server', '--stdio',
     '-c', 'cli_auth_credentials_store="file"', '-c', 'web_search="disabled"',
     '-c', 'analytics.enabled=false', '-c', 'tools.update_plan.enabled=false',
+    '-c', 'tools.experimental_request_user_input.enabled=false',
     '-c', 'project_doc_max_bytes=0',
     '-c', 'include_environment_context=false', '-c', 'include_environment_context_time=false',
     '-c', 'include_permissions_instructions=false', '-c', 'include_collaboration_mode_instructions=false',

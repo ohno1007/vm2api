@@ -26,8 +26,12 @@ and seeds managed CLI credentials from a bound OAuth account when available.
 Explicit login reuses that account or starts official device-code authorization.
 The CLI owns token refresh; the gateway mirrors credentials locally. Existing
 mailbox/password/2FA, session export and subscription features remain available.
-Disabled slots reject preparation/login/probes and are skipped by background
-refresh, quota probes and kernel watchdogs.
+Manually disabled slots reject preparation/login/probes and are skipped by background
+refresh, quota probes and kernel watchdogs. First-login setup is separately allowed
+for a slot parked only for missing credentials; inference remains blocked until
+login succeeds. Turning scheduling off stops any active device-login process.
+Guest boot does not start an unprepared CLI, and cold startup waits for both SSH
+and the shared-home permissions to become ready.
 
 ## Network and overhead
 
@@ -44,7 +48,8 @@ America/Los_Angeles. Production measurement: guest 330 MB used / 624 MB availabl
 CLI RSS 154,660 KiB (about 151 MiB).
 
 Disabling unused CLI tools/discovery/context reduced a tiny request from 9,231 to
-roughly 4,700 input tokens. These are individual observations, not a representative
+roughly 4,700 input tokens, then 4,275 after explicitly disabling the CLI interaction
+tool in the r2 deployment. These are individual observations, not a representative
 benchmark. Three warm candidate Fast requests took 4.37, 3.94 and 3.87 seconds;
 production Fast smoke generation took 6.28 seconds. This does not establish a
 guaranteed speedup or meaningful long-output TPS.
@@ -62,10 +67,13 @@ max_completion_tokens, temperature, top_p, logprobs, top_logprobs, seed, stop,
 n other than 1, and parallel_tool_calls:false. Legacy host-side search/image helpers
 and credit reset are unsupported. Manual quota reads use the guest CLI.
 
-Tiers: Standard (default/standard), Fast (priority/fast), Ultrafast (ultrafast/flex).
+Tiers: Standard (default/standard), Fast (priority/fast), Ultrafast (ultrafast).
+Flex is a distinct catalog tier, not an Ultrafast alias.
 Eligibility comes from the CLI catalog; there is no silent downgrade. Standard
 and Fast succeeded. The test account has no Ultrafast and correctly receives
-400 service_tier_unavailable; eligible-account Ultrafast execution is unverified.
+400 service_tier_unavailable. The genuine CLI passed priority/ultrafast wire-tier
+tests with an offline provider catalog in a network-isolated container; this
+verifies engine support, not that the live test account has Ultrafast access.
 The CLI exposes configured tier but no upstream billed-tier receipt, so response
 service_tier remains null and metadata identifies the requested configuration.
 
@@ -94,7 +102,8 @@ and purchased-credit multipliers are not interchangeable.
    executable SHA-256 hashes are verified. Do not commit the binary.
 3. Create a local OpenAI Ubuntu 24.04 KVM slot with the official CLI checkbox;
    bind its proxy and credentials. Compatible existing slots can enable the engine
-   through the credential panel.
+   through the credential panel, then restart their VM to adopt the CLI runner.
+   A legacy runner cannot start this engine until that restart.
 4. Prepare CLI, start the guest, then click CLI login. Server helper:
    `KIN_PROJECT_ROOT=/opt/vm2api node scripts/codex-cli-prepare.mjs <vm-id>`.
 5. Send a supported request, optionally `service_tier:priority`. Query the model
@@ -107,23 +116,36 @@ Executable: 319,346,888 bytes; archive: 121,764,138 bytes.
 
 ## Validation and deployment
 
-- 177 relevant Linux tests passed; seven focused usage/Responses tests passed after
-  the final stricter usage change. Frontend TypeScript and Vite build passed.
+- 177 relevant Linux tests initially passed. The first-login follow-up passed
+  164 relevant Linux tests, followed by 64 lifecycle/KVM/reload regression tests
+  after the final startup guards. Frontend TypeScript and Vite builds passed.
 - Genuine CLI offline fixture passed initialization, history, text/usage, caller
   tools, tool results and parallel calls in a network-isolated container.
 - Real Standard/Fast/quota tests passed. Pausing the isolated test proxy blocked
   HTTPS and direct IPv4; the proxy was restored. Timezone and IPv6 were verified.
 - Public production tests passed status, Responses JSON, previous_response_id,
   Chat JSON, Fast SSE and Ultrafast rejection.
+- Two empty candidate KVM guests exercised create, proxy-derived timezone,
+  explicit preparation and real official device-code issuance. The second guest
+  passed on the first cold login after the shared-home readiness fix. Manual
+  scheduling-off stopped the CLI and subsequent login returned 409 slot_resting.
 - Public aggregates independently matched SQLite samples, inclusive averages and
   weighted speed. One success: input 4,700 (cached 4,480), output 5, total 4,705.
   Rejected Ultrafast input/output usage remained null.
-- Gateway `local/vm2api:1.4.030-codex-cli-20261101` healthy; guest
+- Gateway `local/vm2api:1.4.030-codex-cli-20261101-r2` healthy; guest
   `local/vm2api-codex-kvm:1` running. Host bind remains 172.18.0.1:8787;
   public host is ai.ai.qsafehub.com.
 - bear3/PostgreSQL/Redis stayed healthy without deployment restarts. Server requests
   to ai.qsafehub.com returned Cloudflare 403, so that public path was not verified.
 - Isolated test containers and unused test proxy process/network were removed.
+
+The r2 public smoke suite passed again, including existing-account login, Standard,
+Fast, history, JSON/SSE and absent-Ultrafast rejection. Its public averages matched
+all seven measured database requests in the verification window; generation TPS
+matched all four CLI samples, and the unknown-usage rejection was excluded.
+The two temporary guest disks and runtimes were removed after validation.
+Immediate r2 rollback backup: `/opt/vm2api-codex-r2-backup-20261031-193933`;
+its compose/source restore returns to `local/vm2api:1.4.030-codex-cli-20261101`.
 
 Backup: `/opt/vm2api-codex-backup-20261031-191357` (UTC timestamp), with old source,
 frontend, compose override and online SQLite backup. Rollback: disable/stop vm-90,

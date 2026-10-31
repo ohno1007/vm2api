@@ -30,6 +30,7 @@ import { inspectWrapCliDir, materializeWrapCli, wrapCliHomeDir } from './wrap-cl
 import { isLocalEgressProxy } from './egress.mjs'
 import { vmNodeId } from '../cluster/placement.mjs'
 import { hostProxyUrlForVm, slotHost } from './slot-host.mjs'
+import { isCodexCliVm } from './codex-cli-config.mjs'
 
 export { runtimeKind }
 
@@ -130,6 +131,10 @@ export async function ensureSlotInferenceRuntime(vm, projectRoot, opts = {}) {
   const routing = opts.routing || {}
   const eager = routing?.inference?.eager_start !== false
   if (isCodexVm(vm)) {
+    // Booting an empty guest is allowed; CLI preparation/login stays explicit.
+    if (isCodexCliVm(vm) && (vm.schedulable === false || !fs.existsSync(path.join(projectRoot, 'vms', vm.id, 'cli-home', '.local', 'share', 'vm2api-codex', 'manifest.json')))) {
+      return { ok: true, skipped: true, reason: vm.schedulable === false ? 'slot_resting' : 'codex_cli_not_prepared', engine: 'codex-cli' }
+    }
     if (!eager) return { ok: true, skipped: true, reason: 'eager_start_off', engine: 'codex' }
     const write = opts.ops?.writeCodexKernelConfig || writeCodexKernelConfig
     const start = opts.ops?.ensureCodexKernel || ensureCodexKernel

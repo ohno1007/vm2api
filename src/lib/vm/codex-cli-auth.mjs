@@ -2,6 +2,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { readCodexAccounts, upsertCodexAccount, codexAccessExpiresAt } from './codex-slot.mjs'
 import { atomicWriteJson } from './vm-file.mjs'
+import { getVm, clearUnschedulable } from './vm-registry.mjs'
+import { canRunCodexCli } from './codex-cli-config.mjs'
 
 function authFile(root, vmId) { return path.join(root, 'vms', vmId, 'cli-home', '.codex-vm2api', 'auth.json') }
 
@@ -40,3 +42,12 @@ export function syncCodexCliAuth(root, vmId) {
 }
 
 export function clearCodexCliAuth(root, vmId) { fs.rmSync(authFile(root, vmId), { force: true }) }
+
+/** A completed explicit login may lift only the missing-credential hold. */
+export function completeCodexCliLogin(root, vmId) {
+  const vm = getVm(root, vmId)
+  if (!vm?.codex_cli?.enabled || !canRunCodexCli(vm, { loginSetup: true })) return false
+  if (!syncCodexCliAuth(root, vmId)) return false
+  clearUnschedulable(root, vmId, { by: 'credential_present', only: ['no_credential'] })
+  return true
+}

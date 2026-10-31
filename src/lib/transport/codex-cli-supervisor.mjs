@@ -12,24 +12,27 @@ import { isLocalEgressProxy, slotNetworkForVm, inspectEgressNetwork, chainName, 
 import { validTimezone } from '../core/timezone.mjs'
 import { configureCodexCliNetwork } from '../vm/codex-cli-network.mjs'
 import { getVm, persistCodexUsage } from '../vm/vm-registry.mjs'
-import { CODEX_CLI_GUEST_BIN, CODEX_CLI_GUEST_HOME, CODEX_CLI_GUEST_WORKDIR, CODEX_CLI_VERSION, CODEX_CLI_BINARY_SHA256, codexCliAppServerArgs } from '../vm/codex-cli-config.mjs'
+import { CODEX_CLI_GUEST_BIN, CODEX_CLI_GUEST_HOME, CODEX_CLI_GUEST_WORKDIR, CODEX_CLI_VERSION, CODEX_CLI_BINARY_SHA256, codexCliAppServerArgs, canRunCodexCli } from '../vm/codex-cli-config.mjs'
+import { completeCodexCliLogin } from '../vm/codex-cli-auth.mjs'
 
 const active = new Map()
 const starting = new Map()
 const stopping = new Map()
 const execAsync = promisify(execFile)
 
-async function waitForGuest(vm, root, host) {
+async function waitForGuest(vm, root, host, options) {
   const args = slotExecArgv(vm, ['python3', '-c', `import os;raise SystemExit(0 if os.access('${CODEX_CLI_GUEST_BIN}',os.X_OK) else 42)`], { user: host.execUser(vm) })
   const deadline = Date.now() + 60_000
   while (Date.now() < deadline) {
     const latest = getVm(root, vm.id)
-    if (latest?.schedulable === false || !latest?.codex_cli?.enabled) throw codexCliError('slot_resting', 409)
+    if (!canRunCodexCli(latest, options) || !latest?.codex_cli?.enabled) throw codexCliError('slot_resting', 409)
     try {
       await execAsync('docker', args, { env: host.dockerEnv() || process.env, timeout: 10_000, maxBuffer: 4096 })
       return
     } catch (e) {
-      if (e.code === 42) throw codexCliError('codex_cli_not_prepared', 409)
+      // SSH may become available before cloud-init mounts/chowns the shared home.
+      // The host manifest was checked already; allow the cold guest to finish setup.
+      if (e.code !== 42 && e.code !== 255 && e.killed !== true && typeof e.code !== 'number') throw e
     }
     await new Promise(resolve => setTimeout(resolve, 1000))
   }
@@ -85,8 +88,8 @@ function command(name, args) {
 }
 
 /** Read-only verification: existing egress must already be fail-closed. */
-export async function assertCodexCliNetwork(vm) {
-  if (vm?.schedulable === false) throw codexCliError('slot_resting', 409)
+export async function assertCodexCliNetwork(vm, options) {
+  if (!canRunCodexCli(vm, options)) throw codexCliError('slot_resting', 409)
   if (!isKvmRuntime(vm)) throw codexCliError('codex_cli_kvm_required', 409)
   const host = slotHost(vm)
   if (host.kind !== 'local') throw codexCliError('codex_cli_local_node_required', 409)
@@ -97,6 +100,7 @@ export async function assertCodexCliNetwork(vm) {
     inspectNetworkOrNull(host.dockerApi(), expected),
   ])
   if (!container?.State?.Running || container.State.Paused) throw codexCliError('slot_not_running', 409)
+  if (!container.Config?.Env?.includes('KIN_VM_ENGINE=codex-cli')) throw codexCliError('codex_cli_vm_restart_required', 409)
   if (container.HostConfig?.NetworkMode !== expected || Object.keys(container.NetworkSettings?.Networks || {}).length !== 1) {
     throw codexCliError('slot_egress_mismatch', 409)
   }
@@ -119,8 +123,8 @@ export async function assertCodexCliNetwork(vm) {
 }
 
 /** Explicit preparation only. Never download/install during credential import or binding. */
-export async function stageCodexCliBinary(projectRoot, vm) {
-  if (vm?.schedulable === false) throw codexCliError('slot_resting', 409)
+export async function stageCodexCliBinary(projectRoot, vm, options) {
+  if (!canRunCodexCli(vm, options)) throw codexCliError('slot_resting', 409)
   const manifestFile = path.join(projectRoot, 'share', 'codex-cli', 'manifest.json')
   let manifest
   try { manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8')) } catch { throw codexCliError('codex_cli_payload_missing', 503) }
@@ -150,9 +154,10 @@ function signature(vm) {
   return crypto.createHash('sha256').update(JSON.stringify({ proxy: vm.proxy, timezone: vm.timezone, locale: vm.locale, enabled: vm.codex_cli?.enabled })).digest('hex')
 }
 
-export async function ensureCodexCli(exec) {
-  const vm = exec.vm
-  if (vm?.schedulable === false) return { ok: false, reason: 'slot_resting' }
+export async function ensureCodexCli(exec, options = {}) {
+  const root = rootFor(exec)
+  const vm = getVm(root, exec.vm?.id) || exec.vm
+  if (!canRunCodexCli(vm, options) || !vm?.codex_cli?.enabled) return { ok: false, reason: 'slot_resting' }
   const key = vm?.id
   if (stopping.has(key)) await stopping.get(key)
   const current = active.get(key)
@@ -161,15 +166,16 @@ export async function ensureCodexCli(exec) {
   const pending = (async () => {
     try {
       if (current) await stopCodexCli(key)
-      const network = await assertCodexCliNetwork(vm)
+      const network = await assertCodexCliNetwork(vm, options)
       if (!network.timezone || vm.timezone_source !== 'proxy_geo') throw codexCliError('proxy_timezone_required', 409)
-      const root = rootFor(exec)
       const latest = getVm(root, vm.id)
-      if (!latest?.codex_cli?.enabled || latest.schedulable === false) throw codexCliError('slot_resting', 409)
+      if (!latest?.codex_cli?.enabled || !canRunCodexCli(latest, options)) throw codexCliError('slot_resting', 409)
       const target = path.join(root, 'vms', vm.id, 'cli-home', '.local', 'share', 'vm2api-codex', 'manifest.json')
       if (!fs.existsSync(target)) throw codexCliError('codex_cli_not_prepared', 409)
       const host = slotHost(vm)
-      await waitForGuest(vm, root, host)
+      await waitForGuest(vm, root, host, options)
+      const beforeSpawn = getVm(root, vm.id)
+      if (!beforeSpawn?.codex_cli?.enabled || !canRunCodexCli(beforeSpawn, options)) throw codexCliError('slot_resting', 409)
       const env = { HOME: '/home/kincli', TZ: network.timezone, LANG: vm.locale || 'en_US.UTF-8' }
       const argv = slotExecArgv(vm, ['python3', '-u', '-c', CODEX_CLI_GUEST_SUPERVISOR], { user: host.execUser(vm), interactive: true, env })
       const child = spawn('docker', argv, { env: host.dockerEnv() || process.env, stdio: ['pipe', 'pipe', 'pipe'] })
@@ -197,12 +203,15 @@ export async function ensureCodexCli(exec) {
         if (message.method === 'account/login/completed') {
           runtime.login = { loginId: message.params.loginId, success: message.params.success, completed: true, error: message.params.success ? null : 'login_failed' }
           runtime.modelCache = null
+          if (message.params.success) {
+            try { completeCodexCliLogin(root, vm.id) } catch {}
+          }
         }
         if (message.method === 'account/updated') { runtime.account = null; runtime.modelCache = null }
       })
       rpc.on('failure', () => { if (active.get(key) === runtime) active.delete(key); child.stdin.end() })
       await rpc.initialize({ timeoutMs: 20_000 })
-      if (getVm(root, vm.id)?.schedulable === false || !getVm(root, vm.id)?.codex_cli?.enabled) throw codexCliError('slot_resting', 409)
+      if (!canRunCodexCli(getVm(root, vm.id), options) || !getVm(root, vm.id)?.codex_cli?.enabled) throw codexCliError('slot_resting', 409)
       return { ok: true, runtime }
     } catch (error) {
       await stopCodexCli(key)
@@ -269,7 +278,7 @@ export async function codexCliModels(runtime) {
 }
 
 export async function startCodexCliLogin(exec, { deviceCode = false } = {}) {
-  const ready = await ensureCodexCli(exec)
+  const ready = await ensureCodexCli(exec, { loginSetup: true })
   if (!ready.ok) throw codexCliError(ready.reason, 409)
   if (ready.runtime.inFlight) throw codexCliError('slot_busy', 409)
   const result = await ready.runtime.rpc.request('account/login/start', { type: deviceCode ? 'chatgptDeviceCode' : 'chatgpt' })

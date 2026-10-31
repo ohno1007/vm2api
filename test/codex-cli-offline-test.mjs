@@ -55,8 +55,19 @@ const upstream = http.createServer(async (req, res) => {
 await new Promise((resolve) => upstream.listen(0, '127.0.0.1', resolve))
 const dir = fs.mkdtempSync('/tmp/codex-offline-')
 const base = `http://127.0.0.1:${upstream.address().port}`
+// Offline provider metadata, not an entitlement override on a real account.
+const catalogPath = `${dir}/fixture-models.json`
+fs.writeFileSync(catalogPath, JSON.stringify({ models: [{
+  slug: 'gpt-6.1-sol', display_name: 'Offline fixture', description: 'Protocol test',
+  supported_reasoning_levels: [{ effort: 'low', description: 'Low' }],
+  shell_type: 'disabled', visibility: 'list', supported_in_api: true, priority: 0,
+  base_instructions: 'You are a helpful assistant.', support_verbosity: false,
+  truncation_policy: { mode: 'tokens', limit: 10000 }, experimental_supported_tools: [],
+  service_tiers: ['priority', 'ultrafast'].map(id => ({ id, name: id, description: 'Offline test only' })),
+}] }))
 const flags = [
   ...codexCliAppServerArgs().slice(2),
+  '-c', `model_catalog_json="${catalogPath}"`,
   '-c', 'model_provider="vm2api_fixture"',
   '-c', `model_providers.vm2api_fixture={ name="Offline fixture", base_url="${base}", wire_api="responses", requires_openai_auth=false }`,
   '-c', 'web_search="disabled"',
@@ -103,7 +114,8 @@ try {
   console.log('usage', JSON.stringify(usage))
   console.log('PASS: official CLI initialize, injected history, streaming and authoritative usage')
   const events = []
-  const modelInfo = { id: 'gpt-6.1-sol', serviceTiers: [{ id: 'priority' }, { id: 'ultrafast' }] }
+  const modelInfo = (await rpc.request('model/list', { includeHidden: false })).data.find(m => m.id === 'gpt-6.1-sol')
+  assert.ok(modelInfo.serviceTiers.some(t => t.id === 'ultrafast'))
   const invoke = (body) => streamCodexCliResponse({ rpc, body: { model: 'gpt-6.1-sol', ...body }, modelInfo, cwd: dir,
     timeoutMs: 20_000, idleTimeoutMs: 10_000, onEvent: async (line) => events.push(JSON.parse(line.slice(6))) })
   const text = await invoke({ input: 'Reply OK.' })
@@ -141,6 +153,15 @@ try {
   assert.equal(parallel.ok, true, JSON.stringify(parallel))
   assert.equal(parallel.body.output.filter(i => i.type === 'function_call').length, 2, 'parallel tool handoff must retain every call')
   console.log('PASS: parallel external tool calls remain complete')
+  nextReply = 'text'
+  for (const tier of ['priority', 'ultrafast']) {
+    const result = await invoke({ input: 'Reply OK.', service_tier: tier })
+    assert.equal(result.ok, true, JSON.stringify(result))
+    assert.equal(requests.at(-1).service_tier, tier, 'configured tier must reach the actual CLI upstream request')
+    assert.equal(result.body.service_tier, null, 'configuration is not a billed-tier receipt')
+    assert.equal(result.usage.total_tokens, 130)
+    console.log('PASS: genuine CLI upstream tier', tier)
+  }
 } finally {
   rpc.close()
   child.kill('SIGTERM')

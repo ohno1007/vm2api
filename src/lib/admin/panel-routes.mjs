@@ -3318,6 +3318,7 @@ export function createPanelHandler(ctx) {
         }
         const reason = body.schedulable ? null : body.reason || 'disabled'
         const summary = setScheduleOff(cfg.paths.project, id, !body.schedulable, { reason, preserveStatus: true })
+        if (!body.schedulable && currentVm?.codex_cli?.enabled) await stopCodexCli(id)
         return json(
           res,
           200,
@@ -3538,6 +3539,7 @@ export function createPanelHandler(ctx) {
           }
           const prev = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
           prev.id = prev.id || id
+          if (prev.codex_cli?.enabled) await stopCodexCli(id)
           const slotDir = path.join(cfg.paths.project, 'vms', id)
           codexMailboxService(cfg.paths.project).remove(id)
           const removed = []

@@ -983,7 +983,8 @@ export async function startVmRuntime(vm, projectRoot, { recreate = false, routin
   const restartPolicy = updateSlotRestartPolicy(vm, existing, sh)
   if (!restartPolicy.ok) return { ok: false, error: restartPolicy.stderr || 'slot restart policy update failed' }
   const paths = workerPaths(projectRoot, vm.id)
-  const replace = recreate || !slotKernelAlive(existing, paths, vm) || codexContainerStale(existing, vm)
+  const replace = recreate || !slotKernelAlive(existing, paths, vm) || codexContainerStale(existing, vm) ||
+    (isCodexCliVm(vm) && existing?.image !== image)
   // Node restart / 开机 must not bounce a live slot with a healthy worker.
   if (existing?.running && !replace) {
     runtimePatch(vm, existing, {

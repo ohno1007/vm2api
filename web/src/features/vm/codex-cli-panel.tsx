@@ -5,7 +5,7 @@ import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { toast } from 'sonner'
 
-type State = { settings: { enabled: boolean; parallel?: number }; ok?: boolean; version?: string; inFlight?: number; account?: { email?: string }; login?: { completed?: boolean; success?: boolean } }
+type State = { settings: { enabled: boolean; parallel?: number }; setupAllowed?: boolean; ok?: boolean; version?: string; inFlight?: number; account?: { email?: string }; login?: { completed?: boolean; success?: boolean } }
 export function CodexCliPanel({ vm }: { vm: Vm }) {
   const queryClient = useQueryClient()
   const [busy, setBusy] = useState(false)
@@ -26,7 +26,7 @@ export function CodexCliPanel({ vm }: { vm: Vm }) {
     finally { setBusy(false) }
   }
   const enabled = state.data?.settings.enabled === true
-  const resting = vm.schedulable === false
+  const resting = state.data?.setupAllowed !== true
   return <div className='space-y-2 rounded-md border p-3'>
     <div className='font-medium'>虚拟机内官方 Codex CLI</div>
     <p className='text-muted-foreground text-xs'>复用槽位内进程与代理出口。导入和绑定保持静置；准备后点击登录。请求使用 service_tier 选择 default、priority 或 ultrafast，支持情况由账号决定。</p>
