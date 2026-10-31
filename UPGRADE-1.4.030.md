@@ -47,3 +47,18 @@ under `/opt/vm2api-upgrade-1430-20261101`. The deployment replaces the control
 container and synchronizes selected enabled slots; it preserves runtime
 configuration, database contents, credentials, VM disks, and existing slot and
 Sub2API containers. Do not replace this build with the unmodified upstream image.
+
+## Production result (2026-11-01)
+
+The deployed image is `local/vm2api:1.4.030-custom`, image ID
+`sha256:f6fbe775784cc57508775bd4c75e6ce895fdd9e2d16b0259ed575ba79a4402c9`.
+The authenticated version endpoint reports `1.4.030`; the control container is
+healthy. The credential-pool and slot login-status endpoints respond normally.
+An explicit test on enabled `vm-01` with its configured `gpt-6-sol` model returned
+HTTP 200, `ok: true`, and `OK` through the production inference path.
+
+Both public hostnames responded with HTTP 200 to browser-style requests.
+Runtime configuration checksums and slot scheduling states matched the backup;
+disabled-slot credential files were unchanged. Existing slot and Sub2API
+container IDs and start times matched their pre-upgrade values. No production
+login, Session export, or subscription modification was initiated by validation.
