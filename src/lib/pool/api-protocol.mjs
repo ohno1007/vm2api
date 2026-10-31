@@ -1,6 +1,4 @@
 import { officialMessagesBody } from '../protocol/anthropic-messages.mjs'
-import { ensureBillingAttribution } from '../identity/crs-persona.mjs'
-import { sealClaudeCodeCch } from '../identity/cch.mjs'
 import { prepareClassifierBody } from '../protocol/request-purpose.mjs'
 import { consumeClaudeSSEData } from '../protocol/convert.mjs'
 import { isCompleteAssistantMessage, mapUpstreamError } from '../core/errors.mjs'
@@ -219,7 +217,6 @@ export async function runApiInference({
   cacheTtl,
   converters,
   requestContext = null,
-  routing = null,
 } = {}) {
   const canonical = officialMessagesBody(convertedBody)
   const model = canonical.model
@@ -253,14 +250,10 @@ export async function runApiInference({
       },
     }
   }
-  let body = isOpenAI
+  const body = isOpenAI
     ? { ...claudeToOpenAIResponsesRequest({ ...canonical, model: picked.upstream_model }), stream: true }
     : { ...canonical, model: picked.upstream_model, stream: true }
   if (requestContext) Object.assign(body, prepareClassifierBody(body))
-  if (!isOpenAI)
-    body = sealClaudeCodeCch(ensureBillingAttribution(body), {
-      enabled: routing?.compatibility?.cch_enabled !== false,
-    })
   const callerProtocolHeaders = forwardAnthropicProtocolHeaders(req?.headers, protocol, protocolKind)
   const headers = mergeCallerProtocolHeaders(
     {
