@@ -40,8 +40,8 @@ TCP/DNS use that proxy. A slot-specific firewall allows only proxy/DNS ports,
 blocks direct forwarding and other host ports, and disables IPv6. Private VM
 management is separate from public outbound traffic.
 
-Deployed slot `vm-90` uses the authorized vm-02 test account. Original vm-02 remains
-`schedulable:false`; do not enable both copies of the same refresh-token grant.
+Production uses `vm-02`; duplicate test slot `vm-90` is disabled and stopped with data retained.
+Do not enable both copies of the same refresh-token grant.
 The guest has one vCPU, 1 GB RAM, a sparse disk overlay and a hard-linked shared CLI
 binary where possible. Its observed exit is the bound US proxy and its timezone is
 America/Los_Angeles. Production measurement: guest 330 MB used / 624 MB available;
@@ -57,15 +57,23 @@ guaranteed speedup or meaningful long-output TPS.
 ## API and accounting
 
 Supported: Responses and Chat Completions, JSON/SSE, structured history, caller-side
-function tools including parallel calls, tool results, structured output and
-disconnect cancellation. Local shell/filesystem tools are disabled.
+function/custom/namespace tools including parallel calls, tool results, structured
+output and disconnect cancellation. Caller shell/filesystem tools execute locally
+in the client; gateway-owned shell/filesystem tools are not exposed.
 
 History is caller-key scoped and in memory: 15-minute TTL, 256 entries, 32 MB.
 `store:false` disables retention; restart loses `previous_response_id` history.
 Unsupported controls explicitly return 400: max_output_tokens, max_tokens,
 max_completion_tokens, temperature, top_p, logprobs, top_logprobs, seed, stop,
-n other than 1, and parallel_tool_calls:false. Legacy host-side search/image helpers
-and credit reset are unsupported. Manual quota reads use the guest CLI.
+n other than 1. Legacy host-side search/image helpers
+are unsupported. Manual quota reads and explicit reset-credit redemption use the guest CLI.
+
+Quota reads preserve 5h/7d reset timestamps, credit counts/expiration, plan and paid-credit balance.
+Reset-credit redemption uses `account/rateLimitResetCredit/consume` with an idempotency UUID,
+checks the actual outcome and reads quota back. Queries never redeem credits. Subscription
+expiry continues to come from OAuth identity claims; missing claims remain unknown and
+access-token expiry is never substituted. CLI credential mirroring retains subscription
+metadata when a refresh omits it and updates it when a new ID token supplies it.
 
 Tiers: Standard (default/standard), Fast (priority/fast), Ultrafast (ultrafast).
 Flex is a distinct catalog tier, not an Ultrafast alias.
@@ -151,8 +159,63 @@ Backup: `/opt/vm2api-codex-backup-20261031-191357` (UTC timestamp), with old sou
 frontend, compose override and online SQLite backup. Rollback: disable/stop vm-90,
 restore backed-up src/lib, src/server.mjs, web/dist, scripts and compose override,
 then recreate only vm2api with `local/vm2api:1.4.030-custom`. Do not replace current
-SQLite with an older snapshot unless data loss is intended. Keep vm-02 disabled.
+SQLite with an older snapshot unless data loss is intended. Keep vm-90 disabled.
 Custom prompt/config files were not read or replaced by this work.
+
+## Responses tools and tier routing (2026-11-01)
+
+Requests containing tools use our guest-side native Responses transport, with credentials
+owned/refreshed by the official CLI. Plain text uses the CLI app-server. The native worker
+has a fixed upstream URL, reads credentials only inside the VM, uses the same enforced
+proxy network, and exits when its gateway pipe closes. No local client command runs in
+the server guest. Import/binding do not launch anything. Disabling scheduling stops both
+the CLI and active native transports.
+
+Function/custom/namespace declarations, exact grammar definitions, tool choice, serial
+tool settings, tool results, citations, hosted output, and SSE events are preserved.
+Native model constraints enforce custom grammar; the app-server fallback adapter only
+describes the grammar and is not equivalent to constrained decoding. Namespace declarations
+and calls retain their namespace; use `auto`/`required` for namespace tools. The upstream
+rejects the nonstandard `tool_choice.namespace` field rather than treating it as a forced
+namespace selector. Missing namespace descriptions default to empty text.
+
+Public live checks passed custom tool call/result continuation, namespace calls, web
+search with citations and image generation with returned image data. `file_search` and
+`code_interpreter` are rejected by this Codex subscription endpoint; the gateway returns
+the real upstream error. Per operator instruction, local files, shell, and code tools
+are executed by the calling client, with only nonlocal operations delegated upstream.
+No vector store or remote code sandbox has been provisioned.
+
+Fast maps to `priority`; Ultrafast remains `ultrafast`. Cold capability catalogs are
+read from eligible active CLI slots before inference admission; disabled/off-shift slots
+are skipped. Account-scoped routing hints expire after 15 minutes and each inference
+revalidates the live 60-second CLI catalog. Known unsupported accounts are excluded before
+sticky/concurrency selection; missing tier access never downgrades locally. If no account
+supports the requested tier, admission returns `service_tier_unavailable`.
+
+The native upstream receipt is retained as `service_tier`, with requested tier and mismatch
+in response metadata. A live Fast request sent `priority` but received `default`: passing
+the tier does not prove priority was delivered. Native usage comes directly from terminal
+upstream counters, including cached input, tool usage and any injected prompt. Sparse
+terminal events are supplemented with completed streamed items for JSON/history clients.
+
+181 focused Linux tests passed, including protocol, quota, browser, routing and KVM
+regressions. The pinned real CLI offline suite passed parallel tools, custom/namespace
+continuation and priority/ultrafast wire tiers. Real reset-credit redemption and paid
+subscription mutations were intentionally not performed.
+
+All 11 production slots (`vm-01` through `vm-09`, `pro200`, `openai-01`) migrated to
+our KVM runner and CLI-managed engine. Every migration passed existing-account login,
+quota read, browser launch and proxy/persona preservation checks. The guest installer
+now gates legacy service startup by engine, and systemd conditions prevent restarting
+the old kernel after setup. Old containers are stopped with restart disabled and data
+retained under `/opt/vm2api-fleet-backup-20261101-cli/<slot>`.
+
+Current gateway image: `local/vm2api:1.4.030-codex-cli-20261101-tools3`.
+Runner image: `local/vm2api-codex-kvm:1` (legacy startup fix included).
+All 11 live catalogs returned `priority`; none advertised `ultrafast` at verification.
+Ultrafast routing was verified with synthetic account catalogs and genuine CLI offline
+wire tests; live Ultrafast generation remains unverified without an entitled account.
 
 ## References
 

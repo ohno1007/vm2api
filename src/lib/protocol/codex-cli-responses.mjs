@@ -3,6 +3,7 @@ import { codexCliError } from '../transport/codex-app-server-rpc.mjs'
 import { CodexCliUsageMeter } from './codex-cli-usage.mjs'
 import { selectCodexCliTier } from './codex-cli-tier.mjs'
 import { renderCodexCliPersona } from './codex-cli-persona.mjs'
+import { prepareCodexCliTools, codexCliToolCall } from './codex-cli-tools.mjs'
 
 function invalid(code) { throw codexCliError(code, 400) }
 
@@ -26,22 +27,14 @@ export function prepareCodexCliRequest(body = {}) {
   if (body.background === true) return invalid('background_not_supported')
   if (body.tool_choice != null && !['auto', 'none'].includes(body.tool_choice)) return invalid('unsupported_tool_choice')
   const tools = body.tool_choice === 'none' ? [] : (body.tools || [])
-  if (!Array.isArray(tools)) return invalid('invalid_tools')
-  const seen = new Set()
-  const dynamicTools = tools.map((tool) => {
-    if (tool?.type !== 'function' || typeof tool.name !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(tool.name)) {
-      return invalid('unsupported_tool')
-    }
-    if (seen.has(tool.name)) return invalid('duplicate_tool_name')
-    seen.add(tool.name)
-    return { type: 'function', name: tool.name, description: tool.description || '', inputSchema: tool.parameters || { type: 'object', properties: {} } }
-  })
+  const toolAdapter = prepareCodexCliTools(tools)
   const items = typeof body.input === 'string'
     ? [{ type: 'message', role: 'user', content: body.input }]
     : Array.isArray(body.input) ? structuredClone(body.input) : invalid('invalid_input')
   if (!items.length) return invalid('input_required')
-  for (const item of items) {
-    if (!item || typeof item !== 'object' || !['message', 'function_call', 'function_call_output', 'reasoning', undefined].includes(item.type)) {
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index] = toolAdapter.historyItem(items[index])
+    if (!item || typeof item !== 'object' || !['message', 'function_call', 'function_call_output', 'web_search_call', 'reasoning', undefined].includes(item.type)) {
       return invalid('unsupported_input_item')
     }
     if (item.type == null) item.type = 'message'
@@ -57,7 +50,7 @@ export function prepareCodexCliRequest(body = {}) {
   }
   const last = items.at(-1)
   const input = last.type === 'message' && last.role === 'user' ? userInput(items.pop().content) : []
-  return { history: items, input, dynamicTools, toolNames: seen }
+  return { history: items, input, dynamicTools: toolAdapter.dynamicTools, toolAdapter }
 }
 
 /** One ephemeral thread per API request; the official app-server process is shared per slot. */
@@ -194,6 +187,21 @@ export async function streamCodexCliResponse({
         emit('response.reasoning_summary_text.delta', { item_id: p.itemId, output_index: row.index, summary_index: p.summaryIndex, delta: p.delta })
       }
       if (message.method === 'item/completed' && p.item?.type === 'reasoning') completeReasoning(p.item)
+      if (['item/started', 'item/completed'].includes(message.method) && p.item?.type === 'webSearch') {
+        let row = itemMap.get(p.item.id)
+        if (!row) {
+          const item = { id: p.item.id, type: 'web_search_call', status: 'in_progress', action: p.item.action || { type: 'search', query: p.item.query } }
+          row = { item, index: response.output.length, done: false }
+          itemMap.set(item.id, row); response.output.push(item)
+          emit('response.output_item.added', { output_index: row.index, item: { ...item } })
+          emit('response.web_search_call.in_progress', { item_id: item.id, output_index: row.index })
+        }
+        if (message.method === 'item/completed' && !row.done) {
+          row.item.status = 'completed'; row.item.action = p.item.action || row.item.action; row.done = true
+          emit('response.web_search_call.completed', { item_id: row.item.id, output_index: row.index })
+          emit('response.output_item.done', { output_index: row.index, item: row.item })
+        }
+      }
       if (message.method === 'model/rerouted') finish(codexCliError('model_rerouted', 502))
       if (message.method === 'turn/completed') finish(null, p.turn)
     } catch (error) { finish(error) }
@@ -201,18 +209,22 @@ export async function streamCodexCliResponse({
   const onServerRequest = (message) => {
     const p = message.params || {}
     if (finished || p.threadId !== threadId || (turnId && p.turnId && p.turnId !== turnId)) return
-    if (message.method !== 'item/tool/call' || !prepared.toolNames.has(p.tool) || p.namespace) {
+    if (message.method !== 'item/tool/call' || !prepared.toolAdapter.lookup(p.namespace, p.tool)) {
       rpc.rejectRequest(message.id)
       return finish(codexCliError('unsupported_cli_tool_request'))
     }
     touch()
     if (!itemMap.has(p.callId)) {
-      const item = { id: `fc_${randomUUID().replaceAll('-', '')}`, type: 'function_call', status: 'completed', call_id: p.callId, name: p.tool, arguments: JSON.stringify(p.arguments) }
+      let item
+      try { item = codexCliToolCall(prepared.toolAdapter, p, `fc_${randomUUID().replaceAll('-', '')}`) }
+      catch (error) { rpc.rejectRequest(message.id); return finish(error) }
       const row = { item, index: response.output.length, done: true }
       itemMap.set(p.callId, row); response.output.push(item)
-      emit('response.output_item.added', { output_index: row.index, item: { ...item, status: 'in_progress', arguments: '' } })
-      emit('response.function_call_arguments.delta', { item_id: item.id, output_index: row.index, delta: item.arguments })
-      emit('response.function_call_arguments.done', { item_id: item.id, output_index: row.index, arguments: item.arguments })
+      const field = item.type === 'custom_tool_call' ? 'input' : 'arguments'
+      const event = item.type === 'custom_tool_call' ? 'custom_tool_call_input' : 'function_call_arguments'
+      emit('response.output_item.added', { output_index: row.index, item: { ...item, status: 'in_progress', [field]: '' } })
+      emit(`response.${event}.delta`, { item_id: item.id, output_index: row.index, delta: item[field] })
+      emit(`response.${event}.done`, { item_id: item.id, output_index: row.index, [field]: item[field] })
       emit('response.output_item.done', { output_index: row.index, item })
     }
     // API callers execute their tools. Cancel this CLI turn without fabricating a tool result.
@@ -232,6 +244,7 @@ export async function streamCodexCliResponse({
       approvalPolicy: 'never', sandbox: 'read-only', allowProviderModelFallback: false,
       baseInstructions: persona.baseInstructions,
       dynamicTools: prepared.dynamicTools,
+      config: prepared.toolAdapter.config,
       ...(typeof body.instructions === 'string' ? { developerInstructions: body.instructions } : {}),
     }, { signal })
     threadId = start.thread.id
@@ -251,7 +264,7 @@ export async function streamCodexCliResponse({
     turnId ||= started.turn?.id
     if (signal?.aborted) onAbort()
     turnResult = await done
-    const hasTools = response.output.some((item) => item.type === 'function_call')
+    const hasTools = response.output.some((item) => ['function_call', 'custom_tool_call'].includes(item.type))
     if (turnResult.status !== 'completed' && !(hasTools && interrupting && turnResult.status === 'interrupted')) {
       const code = typeof turnResult.error?.codexErrorInfo === 'string' ? turnResult.error.codexErrorInfo : 'codex_cli_turn_failed'
       const status = ['usageLimitExceeded', 'rateLimitExceeded'].includes(code) ? 429 : code === 'unauthorized' ? 401 : code === 'badRequest' || code === 'contextWindowExceeded' ? 400 : 502

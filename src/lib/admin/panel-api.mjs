@@ -1125,8 +1125,8 @@ export async function buildProbeOne({
     return ok({
       vm_id: id,
       account_uuid: null,
-      source: 'openai-wham-usage',
-      via: 'socks5',
+      source: result.source || 'openai-wham-usage',
+      via: result.source === 'codex-cli' ? 'guest-cli' : 'socks5',
       five_hour: {
         utilization: result.quota?.utilization_5h ?? null,
         resets_at: result.quota?.reset_5h || null,

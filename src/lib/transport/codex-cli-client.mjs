@@ -4,6 +4,7 @@ import { CODEX_CLI_GUEST_WORKDIR } from '../vm/codex-cli-config.mjs'
 import { CodexCliHistory, codexCliHistoryOwner } from '../protocol/codex-cli-history.mjs'
 import path from 'node:path'
 import { syncCodexCliAuth } from '../vm/codex-cli-auth.mjs'
+import { needsNativeCodexResponse, streamNativeCodexResponse } from './codex-cli-native.mjs'
 
 const history = new CodexCliHistory()
 
@@ -16,7 +17,6 @@ export async function streamCodexCli(opts = {}) {
       if (original[key] != null) return failure(`codex_cli_unsupported_${key}`, 400)
     }
     if (original.n != null && original.n !== 1) return failure('codex_cli_unsupported_n', 400)
-    if (original.parallel_tool_calls === false) return failure('codex_cli_unsupported_serial_tools', 400)
     const ready = await ensureCodexCli(opts.exec)
     if (!ready.ok) return failure(ready.reason, ready.reason === 'slot_resting' ? 409 : 503)
     runtime = ready.runtime
@@ -29,7 +29,8 @@ export async function streamCodexCli(opts = {}) {
     const body = history.expand(opts.envelope?.body || opts.body, owner)
     const model = models.find((m) => m.id === body.model || m.model === body.model)
     if (!model) return failure('model_not_allowed', 400)
-    const result = await streamCodexCliResponse({ ...opts, rpc: runtime.rpc, body, vm: opts.exec.vm, modelInfo: model, requirements, cwd: CODEX_CLI_GUEST_WORKDIR })
+    const invoke = needsNativeCodexResponse(body) ? streamNativeCodexResponse : streamCodexCliResponse
+    const result = await invoke({ ...opts, runtime, rpc: runtime.rpc, body, vm: opts.exec.vm, modelInfo: model, requirements, cwd: CODEX_CLI_GUEST_WORKDIR })
     history.remember(body, result.body, owner, opts.responseStore !== false)
     return result
   } catch (error) {

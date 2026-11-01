@@ -23,6 +23,7 @@ import { modelMatchesAllowlist } from './slot-model-gate.mjs'
 import { proxyBlockedReason } from '../vm/proxy-policy.mjs'
 import { activeHoursOf, evaluateActiveHours } from './active-hours.mjs'
 import { effectiveOpenAIPolicy, evaluateOpenAIQuotaGate, normalizeOpenAIQuotaPolicy } from './openai-quota-policy.mjs'
+import { codexCliTierSupport } from '../protocol/codex-cli-tier.mjs'
 
 // `stopped` is leftover Claude docker lifecycle. Codex kernel is independent.
 const HARD_UNAVAILABLE = new Set(['dead', 'error', 'disabled'])
@@ -238,6 +239,7 @@ export function orderCodexSessionSlots(
     requestIntervalMs = 0,
     roundRobinCursor = null,
     model = null,
+    serviceTier = null,
     excluded = null,
   } = {},
 ) {
@@ -246,7 +248,13 @@ export function orderCodexSessionSlots(
   const policy = normalizeOpenAIQuotaPolicy(quotaPolicy)
   const found = pickCodexSlots(vms, { pin, now, quotaPolicy: policy, model })
   const boundResting = !!boundVmId && (found.resting || []).includes(boundVmId)
-  const picked = found.error ? found : withModelAllowed(found, byId, model)
+  let picked = found.error ? found : withModelAllowed(found, byId, model)
+  if (!picked.error && serviceTier) {
+    const supported = id => !byId.get(id)?.codex_cli?.enabled || codexCliTierSupport(byId.get(id), model, serviceTier, now) !== false
+    const ids = picked.ids.filter(supported)
+    picked = ids.length ? { ...picked, ids, ready: picked.ready.filter(supported), parked: picked.parked.filter(supported) }
+      : { error: 'service_tier_unavailable', ids: [], ready: [], parked: [] }
+  }
   if (picked.error) {
     return { ...picked, sticky: false, boundState: boundResting ? 'resting' : undefined, candidates: [] }
   }
@@ -368,6 +376,7 @@ export function isCodexFailoverError(result) {
   if (!result || result.ok === true || result.committed === true) return false
   const status = Number(result.status) || 0
   const code = String(result.body?.error?.code || result.error_code || '')
+  if (['service_tier_unavailable', 'service_tier_disabled'].includes(code)) return true
   const message = String(result.body?.error?.message || result.error || '')
   // A request-shaped rejection will fail the same way on every seat. Do not
   // burn the pool on a content policy / invalid body / broken tool call.

@@ -50,7 +50,11 @@ import {
   makeProxyFetch,
   refreshCodexAccessToken,
 } from './codex-models.mjs'
-import { orderCodexSessionSlots, codexSlotAllowsModel, isCodexFailoverError } from '../pool/codex-slot-pool.mjs'
+import { orderCodexSessionSlots, codexSlotAllowsModel, isCodexFailoverError, isCodexSlotReady } from '../pool/codex-slot-pool.mjs'
+import { activeHoursOf, evaluateActiveHours } from '../pool/active-hours.mjs'
+import { canRunCodexCli } from '../vm/codex-cli-config.mjs'
+import { codexCliTierSupport, normalizeCodexCliTier } from './codex-cli-tier.mjs'
+import { ensureCodexCli, codexCliModels } from '../transport/codex-cli-supervisor.mjs'
 import {
   holdOpenAIAccount,
   reportOpenAIAttempt,
@@ -232,6 +236,8 @@ export function pickCodexCandidates(
     if (!codexSlotAllowsModel(vm, model)) return { error: 'model_not_allowed', pin, ids: [] }
     const ordered = orderCodexSessionSlots([vm], {
       pin,
+      model,
+      serviceTier: body?.service_tier,
       excluded,
       quotaPolicy: routingPolicy,
     })
@@ -265,6 +271,7 @@ export function pickCodexCandidates(
     sessionLimit: sessions,
     model,
     excluded,
+    serviceTier: body?.service_tier,
     quotaPolicy: routingPolicy,
   })
   // A resting home migrates the conversation like a gone one: the next slot rebinds it.
@@ -303,6 +310,27 @@ function execFor(projectRoot, vm) {
     vmId: vm.id,
     homeDir: path.join(projectRoot, 'vms', vm.id, 'cli-home'),
     vm,
+  }
+}
+
+/** Discover cold tier catalogs before spending inference failover attempts. */
+async function prepareCodexTierCandidates(projectRoot, req, body, ownerScope, signal) {
+  let tier
+  try { tier = normalizeCodexCliTier(body?.service_tier) } catch { return }
+  if (tier === 'standard' || signal?.aborted) return
+  const scope = keyScopeFromRequest(req), owner = ownerScope || ownerScopeFromRequest(req), pin = pinnedVmId(req)
+  if (scope.group_type === 'anthropic' || vmPoolDenial(scope)) return
+  const candidates = listVms(projectRoot).filter(vm => vm.codex_cli?.enabled && (!pin || pin === vm.id) &&
+    keyAllowsVm(scope, vm) && vmMatchesOwnerScope(vm, owner) && isCodexSlotReady(vm) && canRunCodexCli(vm) &&
+    codexSlotAllowsModel(vm, body.model) && evaluateActiveHours(activeHoursOf(vm), Date.now(), vm.timezone).active &&
+    codexCliTierSupport(vm, body.model, tier) === null)
+  for (let i = 0; i < candidates.length && !signal?.aborted; i += 3) {
+    await Promise.allSettled(candidates.slice(i, i + 3).map(async candidate => {
+      const vm = getVm(projectRoot, candidate.id)
+      if (!canRunCodexCli(vm) || !vm.codex_cli?.enabled || signal?.aborted) return
+      const ready = await ensureCodexCli(execFor(projectRoot, vm))
+      if (ready.ok && canRunCodexCli(getVm(projectRoot, vm.id)) && !signal?.aborted) await codexCliModels(ready.runtime)
+    }))
   }
 }
 
@@ -673,6 +701,7 @@ export async function handleCodexProtocol({
   let switches = 0
   let counted = false
   try {
+    await prepareCodexTierCandidates(projectRoot, req, converted.body, ownerScope, gone.signal)
     for (;;) {
       const admitted = await admitCodexCandidate(projectRoot, req, pickOpts, { deadline, signal: gone.signal })
       const picked = admitted.picked
@@ -1017,6 +1046,9 @@ export async function handleCodexProtocol({
 function rejectCodexAdmission({ res, json, stats, logBag, picked, model }) {
   stats.errors++
   logBag.error_code = picked.error || 'no_codex_vm'
+  if (picked.error === 'service_tier_unavailable') return json(res, 400, {
+    error: { type: 'invalid_request_error', code: picked.error, param: 'service_tier', message: 'No eligible account supports the requested model and service tier.' },
+  })
   if (picked.error === 'platform_mismatch') {
     return json(res, 400, {
       error: {

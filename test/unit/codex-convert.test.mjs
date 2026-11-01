@@ -89,6 +89,8 @@ test('chat tool_choice hoists function.name onto Responses tool_choice.name', ()
   assert.equal(responsesToolChoice({ type: 'tool', name: 'get_weather' }).name, 'get_weather')
   assert.equal(responsesToolChoice({ type: 'any' }), 'required')
   assert.equal(responsesToolChoice('auto'), 'auto')
+  assert.deepEqual(responsesToolChoice({ type: 'function', name: 'sleep', namespace: 'clock' }), { type: 'function', name: 'sleep', namespace: 'clock' })
+  assert.deepEqual(responsesToolChoice({ type: 'custom', name: 'js', namespace: 'mcp__cua_repl' }), { type: 'custom', name: 'js', namespace: 'mcp__cua_repl' })
 })
 
 test('chat converts to responses input', () => {

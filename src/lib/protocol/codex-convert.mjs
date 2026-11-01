@@ -144,7 +144,7 @@ export function responsesToolChoice(choice) {
         if (!tool || typeof tool !== 'object') return null
         const toolName = String(tool.name || tool.function?.name || '').trim()
         if (tool.type === 'function' || tool.function) {
-          return toolName ? { type: 'function', name: toolName } : null
+          return toolName ? { type: 'function', name: toolName, ...(tool.namespace ? { namespace: tool.namespace } : {}) } : null
         }
         return tool
       })
@@ -155,7 +155,7 @@ export function responsesToolChoice(choice) {
 
   if (type === 'function' || type === 'tool' || type === 'custom') {
     if (!name) return type === 'custom' ? undefined : 'required'
-    return { type: type === 'tool' ? 'function' : type, name }
+    return { type: type === 'tool' ? 'function' : type, name, ...(choice.namespace ? { namespace: choice.namespace } : {}) }
   }
 
   if (type === 'mcp') {
@@ -172,6 +172,7 @@ export function responsesToolChoice(choice) {
 function toolsToCodex(tools) {
   if (!Array.isArray(tools) || !tools.length) return undefined
   return tools.map((tool) => {
+    if (tool?.type === 'custom' || tool?.type === 'namespace') return tool
     if (tool?.type === 'function' && tool.function) {
       return {
         type: 'function',

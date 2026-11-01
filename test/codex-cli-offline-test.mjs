@@ -10,6 +10,7 @@ import { codexCliAppServerArgs } from '../src/lib/vm/codex-cli-config.mjs'
 
 const requests = []
 let nextReply = 'text'
+let fixtureCall = null
 const upstream = http.createServer(async (req, res) => {
   let text = ''
   for await (const chunk of req) text += chunk
@@ -18,7 +19,7 @@ const upstream = http.createServer(async (req, res) => {
   requests.push(body)
   res.writeHead(200, { 'content-type': 'text/event-stream' })
   const item = nextReply.startsWith('tool')
-    ? { type: 'function_call', id: 'fc_fixture', call_id: 'call_fixture', name: 'lookup', arguments: '{"city":"Boston"}', status: 'completed' }
+    ? { type: 'function_call', id: 'fc_fixture', call_id: 'call_fixture', name: 'lookup', arguments: '{"city":"Boston"}', status: 'completed', ...fixtureCall }
     : { type: 'message', id: 'msg_fixture', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'OK', annotations: [] }] }
   const response = { id: 'resp_fixture', object: 'response', model: body.model, status: 'completed', output: [item], usage: {
     input_tokens: 120, input_tokens_details: { cached_tokens: 80 }, output_tokens: 10, output_tokens_details: { reasoning_tokens: 8 }, total_tokens: 130,
@@ -184,6 +185,34 @@ try {
   assert.equal(wireText().includes('Edited synthetic rule'), false)
   assert.ok(wireText().includes('Caller system rule'))
   console.log('PASS: configured system prompt, live edits, slot timezone, caller roles and zero injection reach genuine CLI upstream')
+  const clientTools = [{ type: 'custom', name: 'exec', format: { type: 'grammar', syntax: 'lark', definition: 'start: /.+/' } },
+    { type: 'function', name: 'wait', parameters: { type: 'object', properties: {} } },
+    { type: 'namespace', name: 'clock', tools: [{ type: 'function', name: 'sleep', parameters: { type: 'object', properties: { duration_ms: { type: 'integer' } } } }] },
+    { type: 'namespace', name: 'mcp__cua_repl', tools: [{ type: 'custom', name: 'js' }] },
+    { type: 'web_search' }]
+  nextReply = 'tool'
+  fixtureCall = { name: 'exec', arguments: JSON.stringify({ input: 'return "fixture";\n' }) }
+  const customTool = await invoke({ input: 'Use exec.', tools: clientTools })
+  assert.equal(customTool.ok, true, JSON.stringify(customTool))
+  assert.equal(customTool.body.output[0].type, 'custom_tool_call')
+  assert.equal(customTool.body.output[0].input, 'return "fixture";\n')
+  assert.ok(events.some(e => e.type === 'response.custom_tool_call_input.delta'))
+  assert.ok(requests.at(-1).tools.some(t => t.type === 'web_search'))
+  assert.ok(requests.at(-1).tools.some(t => t.type === 'namespace' && t.name === 'clock'))
+  fixtureCall = { name: 'sleep', namespace: 'clock', arguments: '{"duration_ms":1}' }
+  const namespaced = await invoke({ input: 'Use clock.sleep.', tools: clientTools })
+  assert.equal(namespaced.ok, true, JSON.stringify(namespaced))
+  assert.equal(namespaced.body.output[0].namespace, 'clock')
+  fixtureCall = { name: 'js', namespace: requests.at(-1).tools.find(t => t.type === 'namespace' && t.name.startsWith('gateway_ns_')).name, arguments: '{"input":"return 7;"}' }
+  const nsCustom = await invoke({ input: 'Use mcp__cua_repl.js.', tools: clientTools })
+  assert.equal(nsCustom.ok, true, JSON.stringify(nsCustom))
+  assert.equal(nsCustom.body.output[0].type, 'custom_tool_call')
+  assert.equal(nsCustom.body.output[0].namespace, 'mcp__cua_repl')
+  nextReply = 'text'; fixtureCall = null
+  const customContinuation = await invoke({ tools: clientTools, input: [{ role: 'user', content: 'Use exec.' }, customTool.body.output[0], { type: 'custom_tool_call_output', call_id: customTool.body.output[0].call_id, output: 'fixture' }] })
+  assert.equal(customContinuation.ok, true, JSON.stringify(customContinuation))
+  assert.ok(requests.at(-1).input.some(i => i.type === 'function_call_output' && i.output === 'fixture'))
+  console.log('PASS: CC Switch custom text, namespace function/custom, web search declaration, streaming and tool-result continuation')
 } finally {
   rpc.close()
   child.kill('SIGTERM')

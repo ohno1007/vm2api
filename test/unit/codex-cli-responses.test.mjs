@@ -77,7 +77,7 @@ test('cancellation interrupts and retains late actual usage without marking succ
 })
 
 test('unsupported tools and malformed images fail explicitly', () => {
-  assert.throws(() => prepareCodexCliRequest({ model: 'fixture', input: 'a', tools: [{ type: 'web_search' }] }), /unsupported_tool/)
+  assert.throws(() => prepareCodexCliRequest({ model: 'fixture', input: 'a', tools: [{ type: 'unknown_tool' }] }), /unsupported_tool/)
   assert.throws(() => prepareCodexCliRequest({ model: 'fixture', input: [{ role: 'user', content: [{ type: 'input_image', image_url: 'file:///private' }] }] }), /unsupported_image_url/)
 })
 

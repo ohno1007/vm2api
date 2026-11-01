@@ -201,9 +201,16 @@ apply_resolv
 write_slot_env
 if [ "${KIN_VM_ENGINE:-legacy}" = codex-cli ]; then
   # No unused Claude daemon, listener, or public IPv6 route in a CLI guest.
+  touch /etc/kin-codex-cli-engine
+  for unit in kin-kernel kin-kernel-relay; do
+    mkdir -p "/etc/systemd/system/$unit.service.d"
+    printf '[Unit]\nConditionPathExists=!/etc/kin-codex-cli-engine\n' > "/etc/systemd/system/$unit.service.d/engine.conf"
+  done
+  systemctl daemon-reload
   systemctl disable --now kin-kernel.service kin-kernel-relay.service 2>/dev/null || true
-  systemctl mask kin-kernel.service kin-kernel-relay.service 2>/dev/null || true
   printf 'net.ipv6.conf.all.disable_ipv6=1\nnet.ipv6.conf.default.disable_ipv6=1\n' > /etc/sysctl.d/99-codex-cli.conf
   sysctl -p /etc/sysctl.d/99-codex-cli.conf >/dev/null
+else
+  rm -f /etc/kin-codex-cli-engine
 fi
 log "ready uid=$KIN_KVM_UID gid=$KIN_KVM_GID host=${KIN_KVM_HOSTNAME:-} shares=${KIN_KVM_SHARES:-}"

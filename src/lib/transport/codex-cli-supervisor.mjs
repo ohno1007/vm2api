@@ -11,9 +11,11 @@ import { inspectContainerOrNull, inspectNetworkOrNull } from '../cluster/docker-
 import { isLocalEgressProxy, slotNetworkForVm, inspectEgressNetwork, chainName, portsForProxy, bridgeName } from '../vm/egress.mjs'
 import { validTimezone } from '../core/timezone.mjs'
 import { configureCodexCliNetwork } from '../vm/codex-cli-network.mjs'
-import { getVm, persistCodexUsage } from '../vm/vm-registry.mjs'
+import { getVm, patchVmRecord } from '../vm/vm-registry.mjs'
 import { CODEX_CLI_GUEST_BIN, CODEX_CLI_GUEST_HOME, CODEX_CLI_GUEST_WORKDIR, CODEX_CLI_VERSION, CODEX_CLI_BINARY_SHA256, codexCliAppServerArgs, canRunCodexCli } from '../vm/codex-cli-config.mjs'
 import { completeCodexCliLogin } from '../vm/codex-cli-auth.mjs'
+import { persistCodexCliQuota } from '../protocol/codex-cli-quota.mjs'
+import { cacheCodexCliCatalog, clearCodexCliCatalog, codexCliRoutingCatalog } from '../protocol/codex-cli-tier.mjs'
 
 const active = new Map()
 const starting = new Map()
@@ -181,33 +183,24 @@ export async function ensureCodexCli(exec, options = {}) {
       const child = spawn('docker', argv, { env: host.dockerEnv() || process.env, stdio: ['pipe', 'pipe', 'pipe'] })
       const rpc = new CodexAppServerRpc(child)
       child.stdin.write(JSON.stringify({ bin: CODEX_CLI_GUEST_BIN, home: CODEX_CLI_GUEST_HOME, cwd: CODEX_CLI_GUEST_WORKDIR, args: codexCliAppServerArgs(), timezone: network.timezone, locale: vm.locale || 'en_US.UTF-8' }) + '\n')
-      const runtime = { rpc, child, signature: signature(vm), network, version: CODEX_CLI_VERSION, modelCache: null, account: null, login: null, inFlight: 0 }
+      const runtime = { vmId: key, projectRoot: root, rpc, child, signature: signature(vm), network, version: CODEX_CLI_VERSION, modelCache: null, account: null, login: null, inFlight: 0 }
       active.set(key, runtime)
       rpc.on('notification', (message) => {
         if (message.method === 'account/rateLimits/updated') {
           const limit = message.params.rateLimits
           if (limit && (!limit.limitId || limit.limitId === 'codex')) {
-            const headers = {}
-            for (const role of ['primary', 'secondary']) {
-              const win = limit[role]
-              if (!win) continue
-              if (win.usedPercent != null) headers[`x-codex-${role}-used-percent`] = String(win.usedPercent)
-              if (win.windowDurationMins != null) headers[`x-codex-${role}-window-minutes`] = String(win.windowDurationMins)
-              if (win.resetsAt != null) headers[`x-codex-${role}-reset-at`] = String(win.resetsAt)
-            }
-            if (Object.keys(headers).length && getVm(root, vm.id)?.schedulable !== false) {
-              try { persistCodexUsage(root, vm.id, { headers }) } catch {}
-            }
+            try { persistCodexCliQuota(root, vm.id, message.params) } catch {}
           }
         }
         if (message.method === 'account/login/completed') {
           runtime.login = { loginId: message.params.loginId, success: message.params.success, completed: true, error: message.params.success ? null : 'login_failed' }
           runtime.modelCache = null
+          clearCodexCliCatalog(key)
           if (message.params.success) {
             try { completeCodexCliLogin(root, vm.id) } catch {}
           }
         }
-        if (message.method === 'account/updated') { runtime.account = null; runtime.modelCache = null }
+        if (message.method === 'account/updated') { runtime.account = null; runtime.modelCache = null; clearCodexCliCatalog(key) }
       })
       rpc.on('failure', () => { if (active.get(key) === runtime) active.delete(key); child.stdin.end() })
       await rpc.initialize({ timeoutMs: 20_000 })
@@ -233,6 +226,8 @@ export async function stopCodexCli(vmId) {
 
 async function stopRuntime(current, vmId) {
   active.delete(vmId)
+  clearCodexCliCatalog(vmId)
+  for (const child of current.nativeChildren || []) { child.stdin.end(); child.kill('SIGTERM') }
   current.rpc.close()
   const stopped = await new Promise((resolve) => {
     if (current.child.exitCode != null || current.child.signalCode != null) return resolve(true)
@@ -272,6 +267,13 @@ export async function codexCliModels(runtime) {
     const requirements = await runtime.rpc.request('configRequirements/read')
     const data = { models, requirements: requirements.requirements || requirements }
     runtime.modelCache = { at: Date.now(), data }
+    cacheCodexCliCatalog(runtime.vmId, data)
+    if (runtime.projectRoot) {
+      const vm = getVm(runtime.projectRoot, runtime.vmId)
+      if (vm?.codex_cli?.enabled && canRunCodexCli(vm)) patchVmRecord(runtime.projectRoot, vm.id, {
+        codex_cli: { ...vm.codex_cli, routing_catalog: codexCliRoutingCatalog(data, vm.codex?.chatgpt_account_id) },
+      })
+    }
     return data
   })()
   try { return await runtime.modelsPending } finally { runtime.modelsPending = null }

@@ -17,6 +17,8 @@ if [ ! -f "$SEED/kin-guest-setup" ]; then
   done
 fi
 [ -f "$SEED/kin-guest-setup" ] || die "cidata seed missing kin-guest-setup"
+# The seed, not the runner's inherited environment, selects the guest engine.
+if [ -f "$SEED/guest.env" ]; then . "$SEED/guest.env"; fi
 
 if [ -f /etc/os-release ]; then
   # shellcheck disable=SC1091
@@ -142,7 +144,10 @@ if ! install_9p_modules; then
 fi
 
 systemctl daemon-reload
-systemctl enable kin-guest-setup.service kin-kernel.service kin-kernel-relay.service
+systemctl enable kin-guest-setup.service
+if [ "${KIN_VM_ENGINE:-legacy}" != codex-cli ]; then
+  systemctl enable kin-kernel.service kin-kernel-relay.service
+fi
 
 if [ "$NEED_REBOOT" = 1 ]; then
   if [ -f /var/lib/kin-guest-rebooted ]; then
@@ -156,7 +161,7 @@ if [ "$NEED_REBOOT" = 1 ]; then
 fi
 
 systemctl start kin-guest-setup.service
-if ! systemctl is-enabled kin-kernel.service 2>/dev/null | grep -q masked; then
+if [ "${KIN_VM_ENGINE:-legacy}" != codex-cli ] && ! systemctl is-enabled kin-kernel.service 2>/dev/null | grep -q masked; then
   systemctl start kin-kernel.service
   systemctl start kin-kernel-relay.service
 fi

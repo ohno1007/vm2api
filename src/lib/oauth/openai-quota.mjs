@@ -19,7 +19,7 @@ import {
 import { CODEX_OAUTH_ORIGINATOR, makeProxyFetch, refreshCodexAccessToken } from '../protocol/codex-models.mjs'
 import { openaiIdentityFromJwt } from './openai-jwt.mjs'
 import { ensureCodexCli } from '../transport/codex-cli-supervisor.mjs'
-import { persistCodexUsage } from '../vm/vm-registry.mjs'
+import { persistCodexCliQuota, readCodexCliQuota, consumeCodexCliResetCredit } from '../protocol/codex-cli-quota.mjs'
 
 export const CHATGPT_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
 export const CHATGPT_RESET_CREDITS_URL = 'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits'
@@ -413,18 +413,7 @@ export async function queryOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = 
     try {
       const ready = await ensureCodexCli({ vm: slot.vm, projectRoot, homeDir: `${projectRoot}/vms/${vmId}/cli-home` })
       if (!ready.ok) return fail(ready.reason, ready.reason, 409)
-      const result = await ready.runtime.rpc.request('account/rateLimits/read', {})
-      const limit = result.rateLimitsByLimitId?.codex || result.rateLimits
-      const headers = {}
-      for (const role of ['primary', 'secondary']) {
-        const win = limit?.[role]
-        if (!win) continue
-        if (win.usedPercent != null) headers[`x-codex-${role}-used-percent`] = String(win.usedPercent)
-        if (win.windowDurationMins != null) headers[`x-codex-${role}-window-minutes`] = String(win.windowDurationMins)
-        if (win.resetsAt != null) headers[`x-codex-${role}-reset-at`] = String(win.resetsAt)
-      }
-      const updated = Object.keys(headers).length ? persistCodexUsage(projectRoot, vmId, { headers, policy }) : null
-      return { ok: true, source: 'codex-cli', usage: updated?.codex?.usage || null, rate_limits: limit || null }
+      return await readCodexCliQuota(ready.runtime.rpc, result => persistCodexCliQuota(projectRoot, vmId, result, policy))
     } catch (e) { return fail(e.code || 'cli_quota_failed', e.code || 'cli_quota_failed', e.status || 502) }
   }
   const result = await queryUpstream(slot, { fetchImpl, rotate, projectRoot, vmId, policy })
@@ -435,7 +424,13 @@ export async function queryOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = 
 export async function resetOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = true, policy = null } = {}) {
   const slot = await loadSlot(projectRoot, vmId)
   if (!slot.ok) return slot
-  if (slot.vm.codex_cli?.enabled) return fail('cli_quota_reset_unsupported', 'Official CLI does not expose quota credit redemption', 400)
+  if (slot.vm.codex_cli?.enabled) {
+    try {
+      const ready = await ensureCodexCli({ vm: slot.vm, projectRoot, homeDir: `${projectRoot}/vms/${vmId}/cli-home` })
+      if (!ready.ok) return fail(ready.reason, ready.reason, 409)
+      return await consumeCodexCliResetCredit(ready.runtime.rpc, result => persistCodexCliQuota(projectRoot, vmId, result, policy))
+    } catch (e) { return fail(e.code || 'cli_reset_failed', e.code || 'cli_reset_failed', e.status || 502) }
+  }
   if (!slot.proxyUrl && !fetchImpl && !slot.direct) return fail('proxy_required', 'GPT 槽未绑定 SOCKS5', 400)
 
   let current = slot
