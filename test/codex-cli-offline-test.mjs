@@ -116,7 +116,7 @@ try {
   const events = []
   const modelInfo = (await rpc.request('model/list', { includeHidden: false })).data.find(m => m.id === 'gpt-6.1-sol')
   assert.ok(modelInfo.serviceTiers.some(t => t.id === 'ultrafast'))
-  const invoke = (body) => streamCodexCliResponse({ rpc, body: { model: 'gpt-6.1-sol', ...body }, modelInfo, cwd: dir,
+  const invoke = (body, extra = {}) => streamCodexCliResponse({ rpc, body: { model: 'gpt-6.1-sol', ...body }, modelInfo, cwd: dir, ...extra,
     timeoutMs: 20_000, idleTimeoutMs: 10_000, onEvent: async (line) => events.push(JSON.parse(line.slice(6))) })
   const text = await invoke({ input: 'Reply OK.' })
   assert.equal(text.ok, true, JSON.stringify(text))
@@ -162,6 +162,28 @@ try {
     assert.equal(result.usage.total_tokens, 130)
     console.log('PASS: genuine CLI upstream tier', tier)
   }
+  const routing = { compatibility: { persona_preset: 'custom', overlay_preset: 'off', persona_templates: { custom: [{ text: 'Synthetic system rule {{timezone}} {{caller_system}}' }] }, persona_timezone_presets: { custom: true } } }
+  const extra = { routing, vm: { timezone: 'America/Los_Angeles' } }
+  const customBody = { instructions: 'Synthetic developer rule', input: [{ role: 'system', content: 'Caller system rule' }, { role: 'developer', content: 'Caller developer history rule' }, { role: 'user', content: 'Reply OK.' }] }
+  const custom = await invoke(customBody, extra)
+  assert.equal(custom.ok, true)
+  // This CLI serializes baseInstructions as a developer message, not the HTTP instructions field.
+  const wireText = () => requests.at(-1).input.flatMap(item => item.content || []).map(part => part.text || '').join('\n')
+  assert.ok(wireText().includes('Synthetic system rule America/Los_Angeles Caller system rule'))
+  assert.ok(JSON.stringify(requests.at(-1).input).includes('Synthetic developer rule'))
+  assert.ok(wireText().includes('Caller developer history rule'))
+  assert.equal(wireText().split('Caller system rule').length - 1, 1)
+  assert.equal(custom.usage.total_tokens, 130)
+  routing.compatibility.persona_templates.custom[0].text = 'Edited synthetic rule'
+  assert.equal((await invoke(customBody, extra)).ok, true)
+  assert.ok(wireText().includes('Edited synthetic rule'))
+  assert.equal(wireText().includes('Synthetic system rule'), false)
+  assert.ok(JSON.stringify(requests.at(-1).input).includes('Caller system rule'))
+  assert.equal((await invoke(customBody, { routing: { compatibility: { persona_preset: 'zero' } } })).ok, true)
+  assert.equal(wireText().includes('You are a helpful assistant.'), false)
+  assert.equal(wireText().includes('Edited synthetic rule'), false)
+  assert.ok(wireText().includes('Caller system rule'))
+  console.log('PASS: configured system prompt, live edits, slot timezone, caller roles and zero injection reach genuine CLI upstream')
 } finally {
   rpc.close()
   child.kill('SIGTERM')

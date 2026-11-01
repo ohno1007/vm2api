@@ -161,3 +161,12 @@ Custom prompt/config files were not read or replaced by this work.
 - https://developers.openai.com/api/docs/pricing
 - https://developers.openai.com/codex/pricing
 - Experimental schema generated from installed CLI 0.166.0.
+# System 提示词接入
+
+CLI 引擎沿用 `/system` 的 `routing.compatibility` 模板、分块开关、常驻约束、环境与覆盖层设置，槽位 `persona_preset` 优先于全局方案。CLI 卡片显示当前方案并提供“恢复跟随全局”。配置在下一次请求创建线程时生效，无需重启 CLI。
+
+模板通过 `thread/start.baseInstructions` 进入官方 CLI。自定义正文不作身份替换；内置身份、agent、guidance、环境占位符使用精简的 Codex 适配值，不复制 Claude Code 的长提示词、工具说明或计费归因头。环境变量取当前槽位的时区、locale 和实际 guest 工作目录，遵守对应开关。沿用旧界面的方案名称不代表加载了完整的官方 Codex 提示词。
+
+Responses `instructions` 保留为 developer instructions；输入中的 system 消息仅在模板使用 `{{caller_system}}` 时被消费一次。其余 system 消息保留文本和位置，映射为 CLI 的 developer 角色，避免 CLI 静默丢弃 system 历史；其他角色、图片和工具调用保持结构。未设置自定义块的“0注入”不添加网关 system 指令，调用方指令仍保留。CLI 自身的协议上下文不受这个开关控制。
+
+多轮历史只保存原始调用方输入和模型输出，每次续接按当前配置重新渲染，避免旧提示词累积。`hide` 等旧计费隐藏开关不影响 CLI 真实用量；注入提示词所用 token 包含在 input 和总量中。运行日志和验证脚本不输出用户保存的提示词。

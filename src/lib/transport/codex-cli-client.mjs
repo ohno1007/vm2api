@@ -29,7 +29,7 @@ export async function streamCodexCli(opts = {}) {
     const body = history.expand(opts.envelope?.body || opts.body, owner)
     const model = models.find((m) => m.id === body.model || m.model === body.model)
     if (!model) return failure('model_not_allowed', 400)
-    const result = await streamCodexCliResponse({ ...opts, rpc: runtime.rpc, body, modelInfo: model, requirements, cwd: CODEX_CLI_GUEST_WORKDIR })
+    const result = await streamCodexCliResponse({ ...opts, rpc: runtime.rpc, body, vm: opts.exec.vm, modelInfo: model, requirements, cwd: CODEX_CLI_GUEST_WORKDIR })
     history.remember(body, result.body, owner, opts.responseStore !== false)
     return result
   } catch (error) {

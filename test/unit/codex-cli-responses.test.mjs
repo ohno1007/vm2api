@@ -32,6 +32,25 @@ class Fixture extends EventEmitter {
 }
 const invoke = (rpc, extra = {}) => streamCodexCliResponse({ rpc, body: { model: 'fixture', input: 'test' }, modelInfo: {}, cwd: '/tmp', ...extra })
 
+test('configured persona is passed to CLI separately from caller instructions and billed at actual usage', async () => {
+  const rpc = new Fixture()
+  const request = rpc.request.bind(rpc)
+  let thread
+  rpc.request = (method, params) => {
+    if (method === 'thread/start') thread = params
+    return request(method, params)
+  }
+  const result = await invoke(rpc, {
+    routing: { compatibility: { persona_preset: 'custom', overlay_preset: 'off', persona_templates: { custom: [{ text: 'Synthetic system rule', hide: true }] } } },
+    body: { model: 'fixture', input: 'Hello', instructions: 'Caller developer rule' },
+  })
+  assert.equal(thread.baseInstructions, 'Synthetic system rule')
+  assert.equal(thread.developerInstructions, 'Caller developer rule')
+  assert.equal(result.ok, true)
+  assert.equal(result.usage.input_tokens, 100)
+  assert.equal(result.usage.total_tokens, 110)
+})
+
 test('concurrent turns isolate deltas and counts and finish reasoning summaries', async () => {
   const rpc = new Fixture()
   const [a, b] = await Promise.all([invoke(rpc), invoke(rpc)])
@@ -60,4 +79,12 @@ test('cancellation interrupts and retains late actual usage without marking succ
 test('unsupported tools and malformed images fail explicitly', () => {
   assert.throws(() => prepareCodexCliRequest({ model: 'fixture', input: 'a', tools: [{ type: 'web_search' }] }), /unsupported_tool/)
   assert.throws(() => prepareCodexCliRequest({ model: 'fixture', input: [{ role: 'user', content: [{ type: 'input_image', image_url: 'file:///private' }] }] }), /unsupported_image_url/)
+})
+
+test('system history uses CLI instruction role without mutating the request or reordering messages', () => {
+  const body = { model: 'fixture', input: [{ role: 'user', content: 'Earlier' }, { role: 'system', content: 'Caller rule' }, { role: 'user', content: 'Now' }] }
+  const prepared = prepareCodexCliRequest(body)
+  assert.deepEqual(prepared.history.map(item => item.role), ['user', 'developer'])
+  assert.equal(prepared.history[1].content[0].text, 'Caller rule')
+  assert.equal(body.input[1].role, 'system')
 })

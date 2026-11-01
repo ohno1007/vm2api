@@ -46,7 +46,7 @@ export function VmPersonaEditor({ id, vm }: { id: string; vm: Vm }) {
         </div>
         <div>
           <div className='text-xs text-muted-foreground'>实际生效</div>
-          <div>{slotPersonaLabel(resolved)}</div>
+          <div>{vm.resolved_persona_preset === 'custom' ? '自定义提示词' : slotPersonaLabel(resolved)}</div>
         </div>
       </div>
       <p className='mt-3 text-xs leading-relaxed text-muted-foreground'>
@@ -54,7 +54,7 @@ export function VmPersonaEditor({ id, vm }: { id: string; vm: Vm }) {
         <Link to='/system' className='underline underline-offset-4'>
           system提示词
         </Link>{' '}
-        修改。槽位覆盖会盖掉全局方案，这是上次第三方请求没带上官方完整提示词的原因。
+        修改。槽位设置优先于全局方案；恢复跟随全局后使用当前全局模板。
       </p>
       {inherits || !canEdit ? null : (
         <Button

@@ -4,6 +4,7 @@ import type { Vm } from '@/types/panel-vm'
 import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { toast } from 'sonner'
+import { VmPersonaEditor } from './persona-editor'
 
 type State = { settings: { enabled: boolean; parallel?: number }; setupAllowed?: boolean; ok?: boolean; version?: string; inFlight?: number; account?: { email?: string }; login?: { completed?: boolean; success?: boolean } }
 export function CodexCliPanel({ vm }: { vm: Vm }) {
@@ -31,6 +32,9 @@ export function CodexCliPanel({ vm }: { vm: Vm }) {
     <div className='font-medium'>虚拟机内官方 Codex CLI</div>
     <p className='text-muted-foreground text-xs'>复用槽位内进程与代理出口。导入和绑定保持静置；准备后点击登录。请求使用 service_tier 选择 default、priority 或 ultrafast，支持情况由账号决定。</p>
     <p className='text-xs'>{enabled ? '已启用' : '未启用'} · {state.data?.ok ? `运行中 ${state.data.version || ''}` : '未启动'} · 并发 {state.data?.inFlight || 0}</p>
+    {enabled && <VmPersonaEditor id={vm.id} vm={vm} />}
+    {enabled && <p className='text-muted-foreground text-xs'>system 提示词修改在下一次请求生效，多轮对话每次重新渲染。CLI 按真实 token 统计，包含注入的提示词。</p>}
+    {enabled && <p className='text-muted-foreground text-xs'>内置身份和环境占位符使用 Codex 适配值，不携带 Claude 计费头；自定义正文原样使用。“0注入”保留调用方指令。</p>}
     <div className='flex flex-wrap gap-2'>
       <Button size='sm' variant='outline' disabled={busy} onClick={() => void act('settings', { enabled: !enabled, parallel: 2 })}>{enabled ? '关闭 CLI 引擎' : '启用 CLI 引擎'}</Button>
       <Button size='sm' variant='outline' disabled={busy || !enabled || resting} onClick={() => void act('prepare')}>准备 CLI</Button>

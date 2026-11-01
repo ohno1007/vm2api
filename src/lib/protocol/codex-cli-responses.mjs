@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { codexCliError } from '../transport/codex-app-server-rpc.mjs'
 import { CodexCliUsageMeter } from './codex-cli-usage.mjs'
 import { selectCodexCliTier } from './codex-cli-tier.mjs'
+import { renderCodexCliPersona } from './codex-cli-persona.mjs'
 
 function invalid(code) { throw codexCliError(code, 400) }
 
@@ -46,6 +47,9 @@ export function prepareCodexCliRequest(body = {}) {
     if (item.type == null) item.type = 'message'
     if (item.type === 'message') {
       if (!['user', 'assistant', 'system', 'developer'].includes(item.role)) return invalid('invalid_input_role')
+      // The CLI history serializer drops system-role items. Its native instruction
+      // role is developer; preserve the text and position using that role.
+      if (item.role === 'system') item.role = 'developer'
       if (typeof item.content === 'string') {
         item.content = [{ type: item.role === 'assistant' ? 'output_text' : 'input_text', text: item.content }]
       }
@@ -58,10 +62,11 @@ export function prepareCodexCliRequest(body = {}) {
 
 /** One ephemeral thread per API request; the official app-server process is shared per slot. */
 export async function streamCodexCliResponse({
-  rpc, body, modelInfo, requirements, cwd, onEvent = async () => {}, signal,
+  rpc, body, modelInfo, requirements, cwd, routing, vm, onEvent = async () => {}, signal,
   timeoutMs = 600_000, idleTimeoutMs = 180_000, maxBufferedBytes = 16 * 1024 * 1024,
 } = {}) {
-  const prepared = prepareCodexCliRequest(body)
+  const persona = renderCodexCliPersona({ body, routing, vm, cwd })
+  const prepared = prepareCodexCliRequest(persona.body)
   const selected = selectCodexCliTier(modelInfo, body.service_tier, requirements)
   if (signal?.aborted) throw codexCliError('client_cancelled', 499)
   const startedAt = Date.now()
@@ -225,7 +230,7 @@ export async function streamCodexCliResponse({
     const start = await rpc.request('thread/start', {
       model: body.model, serviceTier: selected.serviceTier, cwd, ephemeral: true,
       approvalPolicy: 'never', sandbox: 'read-only', allowProviderModelFallback: false,
-      baseInstructions: 'You are a helpful assistant. Follow the supplied instructions and use only the caller-provided tools.',
+      baseInstructions: persona.baseInstructions,
       dynamicTools: prepared.dynamicTools,
       ...(typeof body.instructions === 'string' ? { developerInstructions: body.instructions } : {}),
     }, { signal })
